@@ -586,8 +586,45 @@ func (m Model) View() string {
 
 func (m Model) renderWithOverlay(popup string) string {
 	bg := m.renderDiff()
-	// For now, just show popup at top - proper overlay would dim background
-	return lipgloss.JoinVertical(lipgloss.Left, popup, bg)
+	bgLines := strings.Split(bg, "\n")
+	popupLines := strings.Split(popup, "\n")
+
+	popupHeight := len(popupLines)
+	popupWidth := lipgloss.Width(popup)
+
+	// Calculate top-left position to center the popup
+	startY := (m.height - popupHeight) / 2
+	startX := (m.width - popupWidth) / 2
+
+	if startY < 0 {
+		startY = 0
+	}
+	if startX < 0 {
+		startX = 0
+	}
+
+	// Overlay popup onto background
+	for i, popupLine := range popupLines {
+		bgY := startY + i
+		if bgY >= len(bgLines) {
+			break
+		}
+
+		// Build new line: left padding + popup line + right remainder
+		bgLine := bgLines[bgY]
+		bgRunes := []rune(bgLine)
+
+		// Pad background line if needed
+		for len(bgRunes) < startX {
+			bgRunes = append(bgRunes, ' ')
+		}
+
+		// Create new line with popup overlaid
+		newLine := string(bgRunes[:startX]) + popupLine
+		bgLines[bgY] = newLine
+	}
+
+	return strings.Join(bgLines, "\n")
 }
 
 func (m Model) renderDiff() string {
@@ -702,7 +739,6 @@ func (m Model) renderFileSidebar(height int) string {
 	// Apply sidebar style
 	sidebarStyle := lipgloss.NewStyle().
 		Width(sidebarWidth).
-		Height(height).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderRight(true).
 		BorderForeground(lipgloss.Color("238"))
