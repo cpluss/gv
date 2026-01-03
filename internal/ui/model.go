@@ -55,6 +55,18 @@ const (
 
 const sidebarWidth = 35
 
+// TreeNode represents a folder or file in the file tree
+type TreeNode struct {
+	Name       string
+	Path       string      // Full path (empty for folders)
+	IsFolder   bool
+	Children   []*TreeNode
+	FileIdx    int         // Index in visible diffs (for files only, -1 for folders)
+	Expanded   bool        // For folders: is it expanded?
+	Added      int         // Aggregated stats for folders
+	Removed    int
+}
+
 // hiddenPatterns are file patterns hidden by default
 var hiddenPatterns = []string{
 	"go.sum",
@@ -98,6 +110,9 @@ type Model struct {
 	// Filter state
 	filterInput string
 
+	// Folder tree state
+	expandedFolders map[string]bool // Track which folders are expanded
+
 	// Components
 	styles      Styles
 	highlighter *syntax.Highlighter
@@ -120,13 +135,14 @@ func InitModelWithConfig(cfg Config) (Model, error) {
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	m := Model{
-		styles:       DefaultStyles(),
-		highlighter:  syntax.NewHighlighter(),
-		spinner:      s,
-		viewMode:     ViewDiff,
-		diffMode:     DiffSideBySide,
-		contextLines: 3, // Default context lines
-		loading:      true,
+		styles:          DefaultStyles(),
+		highlighter:     syntax.NewHighlighter(),
+		spinner:         s,
+		viewMode:        ViewDiff,
+		diffMode:        DiffSideBySide,
+		contextLines:    3, // Default context lines
+		loading:         true,
+		expandedFolders: make(map[string]bool),
 	}
 
 	// Get current directory
@@ -501,17 +517,34 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.MouseButtonLeft:
 		// Determine click location
-		// Sidebar layout: Y=0 app header, Y=1 "Files", Y=2 separator, Y=3+ files
+		// Sidebar layout: Y=0 app header, Y=1 "Files", Y=2 separator, Y=3+ tree items
 		if msg.X < sidebarWidth && msg.Y >= 3 {
-			fileIdx := msg.Y - 3 // Subtract app header (1) + sidebar header (2)
+			itemIdx := msg.Y - 3 // Subtract app header (1) + sidebar header (2)
+
+			// Build tree and flatten to find clicked item
 			visible := m.visibleDiffs()
-			if fileIdx >= 0 && fileIdx < len(visible) {
+			tree := buildFileTree(visible, m.expandedFolders)
+			var treeItems []treeItem
+			flattenTree(tree, 0, &treeItems)
+
+			if itemIdx >= 0 && itemIdx < len(treeItems) {
 				if msg.Action == tea.MouseActionRelease {
-					// Single click - select file
-					m.fileCursor = fileIdx
+					item := treeItems[itemIdx]
 					m.focus = FocusSidebar
-					// Also scroll to this file in content
-					m.scrollToFile(fileIdx)
+
+					if item.node.IsFolder {
+						// Toggle folder expand/collapse
+						folderPath := item.node.Path
+						if m.expandedFolders[folderPath] {
+							m.expandedFolders[folderPath] = false
+						} else {
+							m.expandedFolders[folderPath] = true
+						}
+					} else {
+						// Select file and scroll to it
+						m.fileCursor = item.node.FileIdx
+						m.scrollToFile(item.node.FileIdx)
+					}
 				}
 			}
 		} else if msg.X >= sidebarWidth && msg.Action == tea.MouseActionRelease {
@@ -885,6 +918,88 @@ func (m Model) renderDiff() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
+// buildFileTree creates a tree structure from file paths
+func buildFileTree(diffs []git.FileDiff, expandedFolders map[string]bool) *TreeNode {
+	root := &TreeNode{
+		Name:     "",
+		IsFolder: true,
+		Expanded: true,
+		FileIdx:  -1,
+		Children: make([]*TreeNode, 0),
+	}
+
+	for i, diff := range diffs {
+		parts := strings.Split(diff.Path, string(filepath.Separator))
+		current := root
+
+		// Navigate/create folder path
+		for j := 0; j < len(parts)-1; j++ {
+			folderName := parts[j]
+			folderPath := strings.Join(parts[:j+1], string(filepath.Separator))
+
+			// Find or create folder
+			var found *TreeNode
+			for _, child := range current.Children {
+				if child.IsFolder && child.Name == folderName {
+					found = child
+					break
+				}
+			}
+
+			if found == nil {
+				// Check if folder should be expanded (default to true for visibility)
+				expanded := true
+				if val, ok := expandedFolders[folderPath]; ok {
+					expanded = val
+				}
+				found = &TreeNode{
+					Name:     folderName,
+					Path:     folderPath,
+					IsFolder: true,
+					Expanded: expanded,
+					FileIdx:  -1,
+					Children: make([]*TreeNode, 0),
+				}
+				current.Children = append(current.Children, found)
+			}
+
+			// Aggregate stats
+			found.Added += diff.Added
+			found.Removed += diff.Removed
+			current = found
+		}
+
+		// Add file node
+		fileName := parts[len(parts)-1]
+		fileNode := &TreeNode{
+			Name:     fileName,
+			Path:     diff.Path,
+			IsFolder: false,
+			FileIdx:  i,
+			Added:    diff.Added,
+			Removed:  diff.Removed,
+		}
+		current.Children = append(current.Children, fileNode)
+	}
+
+	return root
+}
+
+// flattenTree returns a flat list of visible tree items with their indentation level and file index
+type treeItem struct {
+	node   *TreeNode
+	indent int
+}
+
+func flattenTree(node *TreeNode, indent int, items *[]treeItem) {
+	for _, child := range node.Children {
+		*items = append(*items, treeItem{node: child, indent: indent})
+		if child.IsFolder && child.Expanded {
+			flattenTree(child, indent+1, items)
+		}
+	}
+}
+
 // getDisplayNames returns display names for files, adding path context for duplicates
 func getDisplayNames(diffs []git.FileDiff) map[string]string {
 	result := make(map[string]string)
@@ -949,8 +1064,12 @@ func (m Model) renderFileSidebar(height int) string {
 	visible := m.visibleDiffs()
 	hiddenCount := len(m.diffs) - len(visible)
 
-	// Get display names with disambiguation
-	displayNames := getDisplayNames(visible)
+	// Build file tree
+	tree := buildFileTree(visible, m.expandedFolders)
+
+	// Flatten tree to visible items
+	var treeItems []treeItem
+	flattenTree(tree, 0, &treeItems)
 
 	// Sidebar header
 	title := "Files"
@@ -963,39 +1082,62 @@ func (m Model) renderFileSidebar(height int) string {
 	lines = append(lines, title)
 	lines = append(lines, strings.Repeat("─", sidebarWidth-2))
 
-	for i, diff := range visible {
-		// Collapse indicator
-		indicator := "▼"
-		if diff.Collapsed {
-			indicator = "▶"
-		}
+	// Track file index for cursor matching
+	fileCount := 0
+	for _, item := range treeItems {
+		node := item.node
+		indent := strings.Repeat("  ", item.indent)
 
-		// File name with disambiguation
-		name := displayNames[diff.Path]
-		if len(name) > sidebarWidth-8 {
-			name = name[:sidebarWidth-11] + "..."
-		}
+		var line string
+		var statsStyled string
+		maxNameLen := sidebarWidth - 8 - len(indent)
 
-		// Stats
-		stats := fmt.Sprintf("+%d -%d", diff.Added, diff.Removed)
-
-		line := fmt.Sprintf("%s %s", indicator, name)
-
-		// Highlight current file
-		if i == m.fileCursor {
-			if m.focus == FocusSidebar {
-				line = m.styles.Cursor.Render("> " + line)
-			} else {
-				line = "> " + line
+		if node.IsFolder {
+			// Folder with expand/collapse indicator
+			indicator := "▼"
+			if !node.Expanded {
+				indicator = "▶"
 			}
+			name := node.Name
+			if len(name) > maxNameLen {
+				name = name[:maxNameLen-3] + "..."
+			}
+			// Folder styling with dimmed color
+			folderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+			line = indent + indicator + " " + folderStyle.Render(name+"/")
+			// Aggregate stats for folder
+			statsStyled = m.styles.StatsAdded.Render(fmt.Sprintf("+%d", node.Added)) + " " +
+				m.styles.StatsRemoved.Render(fmt.Sprintf("-%d", node.Removed))
 		} else {
-			line = "  " + line
+			// File with collapse indicator for diff content
+			diff := visible[node.FileIdx]
+			indicator := "▼"
+			if diff.Collapsed {
+				indicator = "▶"
+			}
+			name := node.Name
+			if len(name) > maxNameLen {
+				name = name[:maxNameLen-3] + "..."
+			}
+
+			// Highlight current file
+			if node.FileIdx == m.fileCursor {
+				if m.focus == FocusSidebar {
+					line = m.styles.Cursor.Render(indent + "> " + indicator + " " + name)
+				} else {
+					line = indent + "> " + indicator + " " + name
+				}
+			} else {
+				line = indent + "  " + indicator + " " + name
+			}
+
+			statsStyled = m.styles.StatsAdded.Render(fmt.Sprintf("+%d", node.Added)) + " " +
+				m.styles.StatsRemoved.Render(fmt.Sprintf("-%d", node.Removed))
+			fileCount++
 		}
 
-		// Add stats with color
-		statsStyled := m.styles.StatsAdded.Render(fmt.Sprintf("+%d", diff.Added)) + " " +
-			m.styles.StatsRemoved.Render(fmt.Sprintf("-%d", diff.Removed))
 		// Pad line and add stats
+		stats := fmt.Sprintf("+%d -%d", node.Added, node.Removed)
 		padding := sidebarWidth - lipgloss.Width(line) - lipgloss.Width(stats) - 1
 		if padding > 0 {
 			line += strings.Repeat(" ", padding) + statsStyled
