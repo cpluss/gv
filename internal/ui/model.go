@@ -701,7 +701,42 @@ func (m Model) renderDiff() string {
 	}
 	added, removed := git.ComputeStats(m.diffs)
 	headerText := fmt.Sprintf("gv: %s → %s", branchName, m.mainBranch)
-	statsText := fmt.Sprintf("[%d commits] ", len(m.commits))
+
+	// Count commits and uncommitted separately
+	commitCount := 0
+	selectedCommits := 0
+	hasUncommitted := false
+	uncommittedSelected := false
+	for _, c := range m.commits {
+		if c.IsUncommitted {
+			hasUncommitted = true
+			uncommittedSelected = c.Selected
+		} else {
+			commitCount++
+			if c.Selected {
+				selectedCommits++
+			}
+		}
+	}
+
+	var commitText string
+	if commitCount > 0 {
+		if selectedCommits == commitCount {
+			commitText = fmt.Sprintf("[%d commits", commitCount)
+		} else {
+			commitText = fmt.Sprintf("[%d/%d commits", selectedCommits, commitCount)
+		}
+		if hasUncommitted && uncommittedSelected {
+			commitText += " + uncommitted"
+		}
+		commitText += "] "
+	} else if hasUncommitted && uncommittedSelected {
+		commitText = "[uncommitted] "
+	} else {
+		commitText = ""
+	}
+
+	statsText := commitText
 	statsText += m.styles.StatsAdded.Render(fmt.Sprintf("+%d", added)) + " "
 	statsText += m.styles.StatsRemoved.Render(fmt.Sprintf("-%d", removed))
 	header = m.styles.Header.Width(m.width).Render(headerText + "  " + statsText)
@@ -819,6 +854,16 @@ func (m Model) renderDiffContent(height int, width int) string {
 		}
 		if len(m.diffs) > 0 {
 			return fmt.Sprintf("All %d files hidden (press 'h' to show)", len(m.diffs))
+		}
+		// Count actual commits (non-uncommitted)
+		commitCount := 0
+		for _, c := range m.commits {
+			if !c.IsUncommitted && c.Selected {
+				commitCount++
+			}
+		}
+		if commitCount > 0 {
+			return fmt.Sprintf("%d commit(s) selected, but no file changes\n(press 'c' to view commits)", commitCount)
 		}
 		return "No changes (branch is same as " + m.mainBranch + ")"
 	}
