@@ -2,6 +2,7 @@ package git
 
 import (
 	"bufio"
+	"fmt"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -59,6 +60,11 @@ var (
 // - Only commits selected: git diff <base>..HEAD (just committed changes)
 // - Nothing selected: empty diff
 func ComputeDiff(repoPath, baseBranch string, commits []Commit) ([]FileDiff, error) {
+	return ComputeDiffWithContext(repoPath, baseBranch, commits, 3)
+}
+
+// ComputeDiffWithContext computes the diff with specified context lines.
+func ComputeDiffWithContext(repoPath, baseBranch string, commits []Commit, contextLines int) ([]FileDiff, error) {
 	// Check what's selected
 	uncommittedSelected := false
 	anyCommitSelected := false
@@ -78,16 +84,17 @@ func ComputeDiff(repoPath, baseBranch string, commits []Commit) ([]FileDiff, err
 		return nil, nil
 	}
 
+	contextArg := fmt.Sprintf("-U%d", contextLines)
 	var args []string
 	if uncommittedSelected && anyCommitSelected {
 		// Full diff: base to working directory
-		args = []string{"diff", baseBranch}
+		args = []string{"diff", contextArg, baseBranch}
 	} else if uncommittedSelected {
 		// Just uncommitted: HEAD to working directory
-		args = []string{"diff", "HEAD"}
+		args = []string{"diff", contextArg, "HEAD"}
 	} else {
 		// Just commits: base to HEAD
-		args = []string{"diff", baseBranch + "..HEAD"}
+		args = []string{"diff", contextArg, baseBranch + "..HEAD"}
 	}
 
 	cmd := exec.Command("git", args...)
@@ -95,8 +102,8 @@ func ComputeDiff(repoPath, baseBranch string, commits []Commit) ([]FileDiff, err
 	output, err := cmd.Output()
 	if err != nil {
 		// Try with origin/ prefix for base branch
-		if len(args) > 1 && strings.Contains(args[1], baseBranch) {
-			args[1] = strings.Replace(args[1], baseBranch, "origin/"+baseBranch, 1)
+		if len(args) > 2 && strings.Contains(args[2], baseBranch) {
+			args[2] = strings.Replace(args[2], baseBranch, "origin/"+baseBranch, 1)
 			cmd = exec.Command("git", args...)
 			cmd.Dir = repoPath
 			output, err = cmd.Output()
@@ -192,30 +199,54 @@ func parseDiffOutput(output string) ([]FileDiff, error) {
 		if currentHunk != nil && len(line) > 0 {
 			var lineType LineType
 			var content string
+			var oldNum, newNum int
+
+			// Track current line numbers based on hunk start
+			oldLineNum := currentHunk.OldStart
+			newLineNum := currentHunk.NewStart
+			for _, l := range currentHunk.Lines {
+				switch l.Type {
+				case LineRemoved:
+					oldLineNum++
+				case LineAdded:
+					newLineNum++
+				case LineContext:
+					oldLineNum++
+					newLineNum++
+				}
+			}
 
 			switch line[0] {
 			case '+':
 				lineType = LineAdded
 				content = line[1:]
 				currentDiff.Added++
+				newNum = newLineNum
 			case '-':
 				lineType = LineRemoved
 				content = line[1:]
 				currentDiff.Removed++
+				oldNum = oldLineNum
 			case ' ':
 				lineType = LineContext
 				content = line[1:]
+				oldNum = oldLineNum
+				newNum = newLineNum
 			case '\\':
 				// "\ No newline at end of file" - skip
 				continue
 			default:
 				lineType = LineContext
 				content = line
+				oldNum = oldLineNum
+				newNum = newLineNum
 			}
 
 			currentHunk.Lines = append(currentHunk.Lines, DiffLine{
 				Type:    lineType,
 				Content: content,
+				OldNum:  oldNum,
+				NewNum:  newNum,
 			})
 		}
 	}
