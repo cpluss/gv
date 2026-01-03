@@ -1,0 +1,11 @@
+# Binary (at repo root only)
+/gv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
