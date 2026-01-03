@@ -251,6 +251,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.WindowSizeMsg:
@@ -448,6 +450,59 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.contextLines = 3
 		}
 		m.recomputeDiff()
+	}
+	return m, nil
+}
+
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Only handle mouse in diff view
+	if m.viewMode != ViewDiff {
+		return m, nil
+	}
+
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if msg.X < sidebarWidth {
+			// Scroll in sidebar
+			if m.fileCursor > 0 {
+				m.fileCursor--
+			}
+		} else {
+			// Scroll in content
+			if m.scroll > 0 {
+				m.scroll -= 3
+				if m.scroll < 0 {
+					m.scroll = 0
+				}
+			}
+		}
+	case tea.MouseButtonWheelDown:
+		if msg.X < sidebarWidth {
+			// Scroll in sidebar
+			visible := m.visibleDiffs()
+			if m.fileCursor < len(visible)-1 {
+				m.fileCursor++
+			}
+		} else {
+			// Scroll in content
+			m.scroll += 3
+		}
+	case tea.MouseButtonLeft:
+		if msg.Action == tea.MouseActionRelease {
+			// Determine click location
+			if msg.X < sidebarWidth && msg.Y >= 2 { // Account for header
+				// Click in sidebar - select file
+				fileIdx := msg.Y - 2 // Subtract header lines
+				visible := m.visibleDiffs()
+				if fileIdx >= 0 && fileIdx < len(visible) {
+					m.fileCursor = fileIdx
+					m.focus = FocusSidebar
+				}
+			} else if msg.X >= sidebarWidth {
+				// Click in content area
+				m.focus = FocusContent
+			}
+		}
 	}
 	return m, nil
 }

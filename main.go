@@ -95,7 +95,7 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = p.Run()
 	return err
 }
