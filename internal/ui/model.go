@@ -37,6 +37,13 @@ type Config struct {
 	BaseBranch string
 }
 
+// dataLoadedMsg is sent when async data loading completes
+type dataLoadedMsg struct {
+	commits []git.Commit
+	diffs   []git.FileDiff
+	err     error
+}
+
 // FocusArea represents which pane has focus
 type FocusArea int
 
@@ -74,6 +81,7 @@ type Model struct {
 	diffs           []git.FileDiff
 	mainBranch      string
 	repoPath        string
+	loading         bool // True while loading data asynchronously
 
 	// View state
 	viewMode     ViewMode
@@ -102,7 +110,8 @@ func InitModel() (Model, error) {
 	return InitModelWithConfig(Config{})
 }
 
-// InitModelWithConfig creates a new model with the given configuration
+// InitModelWithConfig creates a new model with the given configuration.
+// This returns immediately with a loading state; data is loaded async in Init().
 func InitModelWithConfig(cfg Config) (Model, error) {
 	m := Model{
 		styles:       DefaultStyles(),
@@ -110,6 +119,7 @@ func InitModelWithConfig(cfg Config) (Model, error) {
 		viewMode:     ViewDiff,
 		diffMode:     DiffSideBySide,
 		contextLines: 3, // Default context lines
+		loading:      true,
 	}
 
 	// Get current directory
@@ -118,14 +128,14 @@ func InitModelWithConfig(cfg Config) (Model, error) {
 		return m, fmt.Errorf("getting current directory: %w", err)
 	}
 
-	// Find git root
+	// Find git root (fast - just walks up looking for .git)
 	repoPath, err := findGitRoot(cwd)
 	if err != nil {
 		return m, fmt.Errorf("finding git root: %w", err)
 	}
 	m.repoPath = repoPath
 
-	// Discover worktrees
+	// Discover worktrees (fast - single git command)
 	worktrees, err := git.ListWorktrees(repoPath)
 	if err != nil {
 		return m, fmt.Errorf("listing worktrees: %w", err)
@@ -133,18 +143,14 @@ func InitModelWithConfig(cfg Config) (Model, error) {
 	m.worktrees = worktrees
 	m.currentWorktree = git.FindCurrentWorktree(worktrees, cwd)
 
-	// Get main branch - use config override if provided
+	// Get main branch - use config override if provided (fast)
 	if cfg.BaseBranch != "" {
 		m.mainBranch = cfg.BaseBranch
 	} else {
 		m.mainBranch = git.GetMainBranch(repoPath)
 	}
 
-	// Load initial data
-	if err := m.loadData(); err != nil {
-		m.err = err
-	}
-
+	// Data loading happens asynchronously in Init()
 	return m, nil
 }
 
@@ -189,12 +195,48 @@ func findGitRoot(path string) (string, error) {
 
 // Init implements tea.Model
 func (m Model) Init() tea.Cmd {
-	return nil
+	// Load data asynchronously
+	return m.loadDataCmd()
+}
+
+// loadDataCmd returns a command that loads commits and diffs asynchronously
+func (m Model) loadDataCmd() tea.Cmd {
+	return func() tea.Msg {
+		if len(m.worktrees) == 0 {
+			return dataLoadedMsg{}
+		}
+
+		wt := m.worktrees[m.currentWorktree]
+
+		// Load commits
+		commits, err := git.ListCommits(wt.Path, m.mainBranch)
+		if err != nil {
+			// Not an error if we're on the main branch
+			commits = nil
+		}
+
+		// Load diffs with current context setting
+		diffs, err := git.ComputeDiffWithContext(wt.Path, m.mainBranch, commits, m.contextLines)
+		if err != nil {
+			return dataLoadedMsg{err: err}
+		}
+
+		return dataLoadedMsg{
+			commits: commits,
+			diffs:   diffs,
+		}
+	}
 }
 
 // Update implements tea.Model
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case dataLoadedMsg:
+		m.loading = false
+		m.commits = msg.commits
+		m.diffs = msg.diffs
+		m.err = msg.err
+		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.WindowSizeMsg:
@@ -439,9 +481,10 @@ func (m Model) handleWorktreeSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		m.currentWorktree = m.cursor
-		m.loadData()
+		m.loading = true
 		m.viewMode = ViewDiff
 		m.scroll = 0
+		return m, m.loadDataCmd()
 	case "esc":
 		m.viewMode = ViewDiff
 	}
@@ -460,9 +503,10 @@ func (m Model) handleWorktreeListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		m.currentWorktree = m.cursor
-		m.loadData()
+		m.loading = true
 		m.viewMode = ViewDiff
 		m.scroll = 0
+		return m, m.loadDataCmd()
 	case "esc":
 		m.viewMode = ViewDiff
 	}
@@ -570,6 +614,10 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
+	if m.loading {
+		return m.renderLoading()
+	}
+
 	switch m.viewMode {
 	case ViewHelp:
 		return m.renderHelp()
@@ -582,6 +630,22 @@ func (m Model) View() string {
 	default:
 		return m.renderDiff()
 	}
+}
+
+func (m Model) renderLoading() string {
+	branchName := ""
+	if len(m.worktrees) > 0 {
+		branchName = m.worktrees[m.currentWorktree].Branch
+	}
+	headerText := fmt.Sprintf("gv: %s → %s", branchName, m.mainBranch)
+	header := m.styles.Header.Width(m.width).Render(headerText)
+
+	loadingText := "Loading..."
+	content := lipgloss.Place(m.width, m.height-2, lipgloss.Center, lipgloss.Center, loadingText)
+
+	footer := m.styles.Footer.Width(m.width).Render("q: quit")
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
 }
 
 func (m Model) renderWithOverlay(popup string) string {
