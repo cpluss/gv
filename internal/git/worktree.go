@@ -85,17 +85,29 @@ func FindCurrentWorktree(worktrees []Worktree, currentPath string) int {
 	if err != nil {
 		return 0
 	}
+	// Ensure path ends with separator for accurate prefix matching
+	if !strings.HasSuffix(absPath, string(filepath.Separator)) {
+		absPath += string(filepath.Separator)
+	}
 
+	// Find the longest matching worktree path (most specific match)
+	bestMatch := 0
+	bestLen := 0
 	for i, wt := range worktrees {
 		wtAbs, err := filepath.Abs(wt.Path)
 		if err != nil {
 			continue
 		}
-		if strings.HasPrefix(absPath, wtAbs) {
-			return i
+		if !strings.HasSuffix(wtAbs, string(filepath.Separator)) {
+			wtAbs += string(filepath.Separator)
+		}
+		// Check if current path is inside this worktree
+		if strings.HasPrefix(absPath, wtAbs) && len(wtAbs) > bestLen {
+			bestMatch = i
+			bestLen = len(wtAbs)
 		}
 	}
-	return 0
+	return bestMatch
 }
 
 // GetMainBranch attempts to determine the main branch name
