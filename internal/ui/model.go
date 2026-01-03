@@ -730,6 +730,41 @@ func (m *Model) scrollToFile(fileIdx int) {
 	}
 }
 
+// getCurrentFileAtScroll returns the file index that is visible at the current scroll position
+func (m Model) getCurrentFileAtScroll() int {
+	visible := m.visibleDiffs()
+	if len(visible) == 0 {
+		return -1
+	}
+
+	line := 0
+	for i, diff := range visible {
+		fileStart := line
+		line++ // File header
+
+		if !diff.Collapsed && !diff.IsBinary {
+			for _, hunk := range diff.Hunks {
+				line += len(hunk.Lines)
+			}
+		} else if diff.IsBinary {
+			line++ // "Binary file" line
+		} else {
+			line++ // "(collapsed)" line
+		}
+
+		// Check if scroll position is within this file's range
+		if m.scroll >= fileStart && m.scroll < line {
+			return i
+		}
+	}
+
+	// If scroll is beyond all content, return last file
+	if len(visible) > 0 {
+		return len(visible) - 1
+	}
+	return -1
+}
+
 func (m *Model) toggleCurrentFile() {
 	// Find which file we're on and toggle its collapsed state
 	// Simplified implementation
@@ -884,7 +919,20 @@ func (m Model) renderDiff() string {
 	statsText := commitText
 	statsText += m.styles.StatsAdded.Render(fmt.Sprintf("+%d", added)) + " "
 	statsText += m.styles.StatsRemoved.Render(fmt.Sprintf("-%d", removed))
-	header = m.styles.Header.Width(m.width).Render(headerText + "  " + statsText)
+
+	// Add current file indicator based on scroll position
+	currentFileIdx := m.getCurrentFileAtScroll()
+	var currentFileText string
+	visible := m.visibleDiffs()
+	if currentFileIdx >= 0 && currentFileIdx < len(visible) {
+		currentFile := visible[currentFileIdx]
+		fileName := filepath.Base(currentFile.Path)
+		fileStats := m.styles.StatsAdded.Render(fmt.Sprintf("+%d", currentFile.Added)) + " " +
+			m.styles.StatsRemoved.Render(fmt.Sprintf("-%d", currentFile.Removed))
+		currentFileText = fmt.Sprintf("  │  %s %s", fileName, fileStats)
+	}
+
+	header = m.styles.Header.Width(m.width).Render(headerText + "  " + statsText + currentFileText)
 
 	// Footer
 	focusHint := "Tab: switch pane"
