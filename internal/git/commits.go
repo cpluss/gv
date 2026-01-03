@@ -8,24 +8,37 @@ import (
 
 // Commit represents a git commit with selection state for filtering
 type Commit struct {
-	Hash     plumbing.Hash
-	Subject  string
-	Author   string
-	Selected bool
+	Hash        plumbing.Hash
+	Subject     string
+	Author      string
+	Selected    bool
+	IsUncommitted bool // True for the virtual "uncommitted changes" entry
 }
 
-// ListCommits returns commits between baseBranch and HEAD.
-// If baseBranch doesn't exist or there are no commits, returns empty slice.
+// ListCommits returns commits between baseBranch and HEAD, plus a virtual
+// "uncommitted changes" entry if there are working directory changes.
 func ListCommits(repoPath, baseBranch string) ([]Commit, error) {
 	repo, err := git.PlainOpen(repoPath)
 	if err != nil {
 		return nil, err
 	}
 
+	var commits []Commit
+
+	// Check for uncommitted changes and add virtual commit
+	if hasUncommittedChanges(repoPath) {
+		commits = append(commits, Commit{
+			Subject:       "(uncommitted changes)",
+			Author:        "",
+			Selected:      true,
+			IsUncommitted: true,
+		})
+	}
+
 	// Get HEAD
 	headRef, err := repo.Head()
 	if err != nil {
-		return nil, err
+		return commits, nil // Return just uncommitted if no HEAD
 	}
 
 	// Get base branch reference
@@ -34,42 +47,63 @@ func ListCommits(repoPath, baseBranch string) ([]Commit, error) {
 		// Try remote reference
 		baseRef, err = repo.Reference(plumbing.NewRemoteReferenceName("origin", baseBranch), true)
 		if err != nil {
-			return nil, err
+			return commits, nil // Return just uncommitted if no base
 		}
 	}
 
 	// Get base commit
 	baseCommit, err := repo.CommitObject(baseRef.Hash())
 	if err != nil {
-		return nil, err
+		return commits, nil
 	}
 
 	// Walk from HEAD back to find commits not reachable from base
 	headCommit, err := repo.CommitObject(headRef.Hash())
 	if err != nil {
-		return nil, err
+		return commits, nil
 	}
 
 	// Build set of commits reachable from base
 	baseCommits := make(map[plumbing.Hash]bool)
 	err = buildCommitSet(baseCommit, baseCommits)
 	if err != nil {
-		return nil, err
+		return commits, nil
 	}
 
 	// Collect commits from HEAD that aren't in base
-	var commits []Commit
-	err = collectBranchCommits(headCommit, baseCommits, &commits)
+	var branchCommits []Commit
+	err = collectBranchCommits(headCommit, baseCommits, &branchCommits)
 	if err != nil {
-		return nil, err
+		return commits, nil
 	}
 
-	// Mark all as selected by default
-	for i := range commits {
-		commits[i].Selected = true
+	// Mark all as selected by default and append
+	for i := range branchCommits {
+		branchCommits[i].Selected = true
 	}
+	commits = append(commits, branchCommits...)
 
 	return commits, nil
+}
+
+// hasUncommittedChanges checks if there are staged or unstaged changes
+func hasUncommittedChanges(repoPath string) bool {
+	repo, err := git.PlainOpen(repoPath)
+	if err != nil {
+		return false
+	}
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		return false
+	}
+
+	status, err := wt.Status()
+	if err != nil {
+		return false
+	}
+
+	return !status.IsClean()
 }
 
 // buildCommitSet builds a set of all commits reachable from the given commit

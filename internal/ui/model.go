@@ -133,8 +133,7 @@ func (m *Model) loadData() error {
 	m.commits = commits
 
 	// Load diffs
-	selectedHashes := git.SelectedHashes(commits)
-	diffs, err := git.ComputeDiff(wt.Path, m.mainBranch, selectedHashes)
+	diffs, err := git.ComputeDiff(wt.Path, m.mainBranch, commits)
 	if err != nil {
 		return err
 	}
@@ -330,8 +329,7 @@ func (m Model) handleWorktreeListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) recomputeDiff() {
 	wt := m.worktrees[m.currentWorktree]
-	selectedHashes := git.SelectedHashes(m.commits)
-	diffs, err := git.ComputeDiff(wt.Path, m.mainBranch, selectedHashes)
+	diffs, err := git.ComputeDiff(wt.Path, m.mainBranch, m.commits)
 	if err != nil {
 		m.err = err
 		return
@@ -598,7 +596,13 @@ func (m Model) renderCommitFilter() string {
 			selected++
 		}
 
-		line := fmt.Sprintf("%s %s %s", checkbox, commit.Hash.String()[:7], commit.Subject)
+		var line string
+		if commit.IsUncommitted {
+			line = fmt.Sprintf("%s %s", checkbox, commit.Subject)
+		} else {
+			line = fmt.Sprintf("%s %s %s", checkbox, commit.Hash.String()[:7], commit.Subject)
+		}
+
 		if i == m.cursor {
 			line = m.styles.Cursor.Render("> " + line)
 		} else {
@@ -608,7 +612,7 @@ func (m Model) renderCommitFilter() string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, fmt.Sprintf("Showing: %d of %d commits", selected, len(m.commits)))
+	lines = append(lines, fmt.Sprintf("Showing: %d of %d", selected, len(m.commits)))
 
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	return m.styles.Popup.Render(content)

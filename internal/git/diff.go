@@ -6,8 +6,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/go-git/go-git/v5/plumbing"
 )
 
 // FileDiff represents the diff for a single file
@@ -52,21 +50,60 @@ var (
 	hunkHeaderRe     = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 )
 
-// ComputeDiff computes the diff between base branch and working directory.
-// This includes both committed and uncommitted changes.
+// ComputeDiff computes the diff based on selected commits.
 // Uses git diff command for reliable working directory support.
-func ComputeDiff(repoPath, baseBranch string, selectedHashes []plumbing.Hash) ([]FileDiff, error) {
-	// Use git diff to compare base branch to working directory
-	// This shows: committed changes + staged changes + unstaged changes
-	cmd := exec.Command("git", "diff", baseBranch)
+//
+// Selection logic:
+// - Uncommitted + commits selected: git diff <base> (full working dir diff)
+// - Only uncommitted selected: git diff HEAD (just working dir changes)
+// - Only commits selected: git diff <base>..HEAD (just committed changes)
+// - Nothing selected: empty diff
+func ComputeDiff(repoPath, baseBranch string, commits []Commit) ([]FileDiff, error) {
+	// Check what's selected
+	uncommittedSelected := false
+	anyCommitSelected := false
+
+	for _, c := range commits {
+		if c.Selected {
+			if c.IsUncommitted {
+				uncommittedSelected = true
+			} else {
+				anyCommitSelected = true
+			}
+		}
+	}
+
+	// Nothing selected = no diff
+	if !uncommittedSelected && !anyCommitSelected {
+		return nil, nil
+	}
+
+	var args []string
+	if uncommittedSelected && anyCommitSelected {
+		// Full diff: base to working directory
+		args = []string{"diff", baseBranch}
+	} else if uncommittedSelected {
+		// Just uncommitted: HEAD to working directory
+		args = []string{"diff", "HEAD"}
+	} else {
+		// Just commits: base to HEAD
+		args = []string{"diff", baseBranch + "..HEAD"}
+	}
+
+	cmd := exec.Command("git", args...)
 	cmd.Dir = repoPath
 	output, err := cmd.Output()
 	if err != nil {
-		// Try with origin/ prefix
-		cmd = exec.Command("git", "diff", "origin/"+baseBranch)
-		cmd.Dir = repoPath
-		output, err = cmd.Output()
-		if err != nil {
+		// Try with origin/ prefix for base branch
+		if len(args) > 1 && strings.Contains(args[1], baseBranch) {
+			args[1] = strings.Replace(args[1], baseBranch, "origin/"+baseBranch, 1)
+			cmd = exec.Command("git", args...)
+			cmd.Dir = repoPath
+			output, err = cmd.Output()
+			if err != nil {
+				return nil, err
+			}
+		} else {
 			return nil, err
 		}
 	}
