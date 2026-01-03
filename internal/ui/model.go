@@ -1129,29 +1129,74 @@ func (m Model) renderHunkWithWidth(hunk git.Hunk, filename string, width int) []
 func (m Model) renderHunkUnified(hunk git.Hunk, filename string) []string {
 	var lines []string
 
+	// Collect all line contents for batch highlighting
+	var contents []string
 	for _, line := range hunk.Lines {
+		contents = append(contents, line.Content)
+	}
+
+	// Get syntax highlighting for all lines at once
+	highlighted := m.highlighter.HighlightLines(filename, contents)
+
+	for i, line := range hunk.Lines {
 		var prefix string
-		var style lipgloss.Style
+		var prefixStyle lipgloss.Style
+		var bgStyle lipgloss.Style
 		var lineNum string
 
 		switch line.Type {
 		case git.LineAdded:
 			prefix = "+"
-			style = m.styles.LineAdded
+			prefixStyle = m.styles.StatsAdded // Green prefix
+			bgStyle = m.styles.AddedBg        // Subtle green background
 			lineNum = fmt.Sprintf("    %4d ", line.NewNum)
 		case git.LineRemoved:
 			prefix = "-"
-			style = m.styles.LineRemoved
+			prefixStyle = m.styles.StatsRemoved // Red prefix
+			bgStyle = m.styles.RemovedBg        // Subtle red background
 			lineNum = fmt.Sprintf("%4d     ", line.OldNum)
 		default:
 			prefix = " "
-			style = m.styles.LineContext
+			prefixStyle = m.styles.LineContext
+			bgStyle = lipgloss.NewStyle()
 			lineNum = fmt.Sprintf("%4d %4d ", line.OldNum, line.NewNum)
 		}
 
 		lineNumStyled := m.styles.LineNumber.Render(lineNum)
-		lineText := prefix + line.Content
-		lines = append(lines, lineNumStyled+style.Render(lineText))
+		prefixStyled := prefixStyle.Render(prefix)
+
+		// Render syntax-highlighted content
+		var contentParts []string
+		if i < len(highlighted) {
+			for _, token := range highlighted[i].Tokens {
+				tokenStyle := lipgloss.NewStyle()
+				if token.Style.Color != "" {
+					tokenStyle = tokenStyle.Foreground(lipgloss.Color(token.Style.Color))
+				}
+				if token.Style.Bold {
+					tokenStyle = tokenStyle.Bold(true)
+				}
+				if token.Style.Italic {
+					tokenStyle = tokenStyle.Italic(true)
+				}
+				contentParts = append(contentParts, tokenStyle.Render(token.Text))
+			}
+		}
+
+		var content string
+		if len(contentParts) > 0 {
+			content = strings.Join(contentParts, "")
+		} else {
+			content = line.Content
+		}
+
+		// Apply background to entire line content (prefix + content)
+		lineContent := prefixStyled + content
+		if line.Type != git.LineContext {
+			lineContent = bgStyle.Render(lineContent)
+		}
+
+		lines = append(lines, lineNumStyled+lineContent)
 	}
 
 	return lines
@@ -1163,8 +1208,45 @@ func (m Model) renderHunkSideBySideWithWidth(hunk git.Hunk, filename string, wid
 	lineNumWidth := 5 // "1234 " format
 	halfWidth := (width - 3 - lineNumWidth*2) / 2 // -3 for separator, -10 for line numbers
 
+	// Collect all line contents for syntax highlighting
+	var allContents []string
+	var contentIndices []int // Maps hunk line index to allContents index
+	for _, line := range hunk.Lines {
+		contentIndices = append(contentIndices, len(allContents))
+		allContents = append(allContents, line.Content)
+	}
+
+	// Get syntax highlighting for all lines
+	highlighted := m.highlighter.HighlightLines(filename, allContents)
+
+	// Helper to render syntax-highlighted content
+	renderSyntaxContent := func(contentIdx int, content string) string {
+		if contentIdx < 0 || contentIdx >= len(highlighted) {
+			return content
+		}
+		var parts []string
+		for _, token := range highlighted[contentIdx].Tokens {
+			tokenStyle := lipgloss.NewStyle()
+			if token.Style.Color != "" {
+				tokenStyle = tokenStyle.Foreground(lipgloss.Color(token.Style.Color))
+			}
+			if token.Style.Bold {
+				tokenStyle = tokenStyle.Bold(true)
+			}
+			if token.Style.Italic {
+				tokenStyle = tokenStyle.Italic(true)
+			}
+			parts = append(parts, tokenStyle.Render(token.Text))
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "")
+		}
+		return content
+	}
+
 	// Helper to render a side-by-side line with proper alignment
-	renderLine := func(leftNum int, leftContent string, leftStyle lipgloss.Style, rightNum int, rightContent string, rightStyle lipgloss.Style) string {
+	renderLine := func(leftNum int, leftContent string, leftContentIdx int, isLeftRemoved bool,
+		rightNum int, rightContent string, rightContentIdx int, isRightAdded bool) string {
 		// Format line numbers
 		var leftNumStr, rightNumStr string
 		if leftNum > 0 {
@@ -1181,78 +1263,109 @@ func (m Model) renderHunkSideBySideWithWidth(hunk git.Hunk, filename string, wid
 		leftNumStyled := m.styles.LineNumber.Render(leftNumStr)
 		rightNumStyled := m.styles.LineNumber.Render(rightNumStr)
 
-		// Pad and style each side separately using lipgloss Width for ANSI-aware padding
-		left := leftStyle.Width(halfWidth).Render(truncate(leftContent, halfWidth))
-		right := rightStyle.Width(halfWidth).Render(truncate(rightContent, halfWidth))
-		return leftNumStyled + left + " │ " + rightNumStyled + right
+		// Render syntax-highlighted content
+		var leftRendered, rightRendered string
+		truncatedLeft := truncate(leftContent, halfWidth-1) // -1 for gutter
+		truncatedRight := truncate(rightContent, halfWidth-1)
+
+		if isLeftRemoved {
+			// Red gutter + syntax highlighted content with red background
+			gutter := m.styles.StatsRemoved.Render("-")
+			syntaxContent := renderSyntaxContent(leftContentIdx, truncatedLeft)
+			leftRendered = m.styles.RemovedBg.Width(halfWidth).Render(gutter + syntaxContent)
+		} else if leftContent != "" {
+			// Context line
+			leftRendered = lipgloss.NewStyle().Width(halfWidth).Render(" " + renderSyntaxContent(leftContentIdx, truncatedLeft))
+		} else {
+			leftRendered = lipgloss.NewStyle().Width(halfWidth).Render("")
+		}
+
+		if isRightAdded {
+			// Green gutter + syntax highlighted content with green background
+			gutter := m.styles.StatsAdded.Render("+")
+			syntaxContent := renderSyntaxContent(rightContentIdx, truncatedRight)
+			rightRendered = m.styles.AddedBg.Width(halfWidth).Render(gutter + syntaxContent)
+		} else if rightContent != "" {
+			// Context line
+			rightRendered = lipgloss.NewStyle().Width(halfWidth).Render(" " + renderSyntaxContent(rightContentIdx, truncatedRight))
+		} else {
+			rightRendered = lipgloss.NewStyle().Width(halfWidth).Render("")
+		}
+
+		return leftNumStyled + leftRendered + " │ " + rightNumStyled + rightRendered
 	}
 
-	// Split lines into old (left) and new (right)
-	var oldLines, newLines []git.DiffLine
+	// Split lines into old (left) and new (right) with their indices
+	type indexedLine struct {
+		line git.DiffLine
+		idx  int
+	}
+	var oldLines, newLines []indexedLine
 
-	for _, line := range hunk.Lines {
+	for i, line := range hunk.Lines {
 		switch line.Type {
 		case git.LineRemoved:
-			oldLines = append(oldLines, line)
+			oldLines = append(oldLines, indexedLine{line, contentIndices[i]})
 		case git.LineAdded:
-			newLines = append(newLines, line)
+			newLines = append(newLines, indexedLine{line, contentIndices[i]})
 		case git.LineContext:
 			// Flush any pending adds/removes
 			for len(oldLines) > 0 || len(newLines) > 0 {
 				var leftContent, rightContent string
-				var leftStyle, rightStyle lipgloss.Style
 				var leftNum, rightNum int
+				var leftIdx, rightIdx int = -1, -1
+				var isLeftRemoved, isRightAdded bool
 
 				if len(oldLines) > 0 {
-					leftContent = oldLines[0].Content
-					leftNum = oldLines[0].OldNum
-					leftStyle = m.styles.LineRemoved
+					leftContent = oldLines[0].line.Content
+					leftNum = oldLines[0].line.OldNum
+					leftIdx = oldLines[0].idx
+					isLeftRemoved = true
 					oldLines = oldLines[1:]
-				} else {
-					leftStyle = m.styles.LineContext
 				}
 
 				if len(newLines) > 0 {
-					rightContent = newLines[0].Content
-					rightNum = newLines[0].NewNum
-					rightStyle = m.styles.LineAdded
+					rightContent = newLines[0].line.Content
+					rightNum = newLines[0].line.NewNum
+					rightIdx = newLines[0].idx
+					isRightAdded = true
 					newLines = newLines[1:]
-				} else {
-					rightStyle = m.styles.LineContext
 				}
 
-				lines = append(lines, renderLine(leftNum, leftContent, leftStyle, rightNum, rightContent, rightStyle))
+				lines = append(lines, renderLine(leftNum, leftContent, leftIdx, isLeftRemoved,
+					rightNum, rightContent, rightIdx, isRightAdded))
 			}
 			// Add context line on both sides
-			lines = append(lines, renderLine(line.OldNum, line.Content, m.styles.LineContext, line.NewNum, line.Content, m.styles.LineContext))
+			lines = append(lines, renderLine(line.OldNum, line.Content, contentIndices[i], false,
+				line.NewNum, line.Content, contentIndices[i], false))
 		}
 	}
 
 	// Flush remaining
 	for len(oldLines) > 0 || len(newLines) > 0 {
 		var leftContent, rightContent string
-		var leftStyle, rightStyle lipgloss.Style
 		var leftNum, rightNum int
+		var leftIdx, rightIdx int = -1, -1
+		var isLeftRemoved, isRightAdded bool
 
 		if len(oldLines) > 0 {
-			leftContent = oldLines[0].Content
-			leftNum = oldLines[0].OldNum
-			leftStyle = m.styles.LineRemoved
+			leftContent = oldLines[0].line.Content
+			leftNum = oldLines[0].line.OldNum
+			leftIdx = oldLines[0].idx
+			isLeftRemoved = true
 			oldLines = oldLines[1:]
-		} else {
-			leftStyle = m.styles.LineContext
 		}
 
 		if len(newLines) > 0 {
-			rightContent = newLines[0].Content
-			rightNum = newLines[0].NewNum
-			rightStyle = m.styles.LineAdded
+			rightContent = newLines[0].line.Content
+			rightNum = newLines[0].line.NewNum
+			rightIdx = newLines[0].idx
+			isRightAdded = true
 			newLines = newLines[1:]
-		} else {
-			rightStyle = m.styles.LineContext
 		}
 
-		lines = append(lines, renderLine(leftNum, leftContent, leftStyle, rightNum, rightContent, rightStyle))
+		lines = append(lines, renderLine(leftNum, leftContent, leftIdx, isLeftRemoved,
+			rightNum, rightContent, rightIdx, isRightAdded))
 	}
 
 	return lines
