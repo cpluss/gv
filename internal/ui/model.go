@@ -767,11 +767,67 @@ func (m Model) renderDiff() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
+// getDisplayNames returns display names for files, adding path context for duplicates
+func getDisplayNames(diffs []git.FileDiff) map[string]string {
+	result := make(map[string]string)
+
+	// Group files by basename
+	byBasename := make(map[string][]string)
+	for _, d := range diffs {
+		base := filepath.Base(d.Path)
+		byBasename[base] = append(byBasename[base], d.Path)
+	}
+
+	// For each file, determine the display name
+	for _, d := range diffs {
+		base := filepath.Base(d.Path)
+		paths := byBasename[base]
+
+		if len(paths) == 1 {
+			// No duplicates, just use basename
+			result[d.Path] = base
+		} else {
+			// Find shortest unique suffix for disambiguation
+			result[d.Path] = getShortestUniquePath(d.Path, paths)
+		}
+	}
+
+	return result
+}
+
+// getShortestUniquePath finds the shortest path suffix that uniquely identifies this file
+func getShortestUniquePath(path string, allPaths []string) string {
+	parts := strings.Split(path, string(filepath.Separator))
+
+	// Start from just the filename and add parent dirs until unique
+	for i := len(parts) - 1; i >= 0; i-- {
+		suffix := filepath.Join(parts[i:]...)
+		isUnique := true
+		for _, other := range allPaths {
+			if other == path {
+				continue
+			}
+			if strings.HasSuffix(other, suffix) || strings.HasSuffix(other, string(filepath.Separator)+suffix) {
+				isUnique = false
+				break
+			}
+		}
+		if isUnique {
+			return suffix
+		}
+	}
+	// Fallback to full path
+	return path
+}
+
 func (m Model) renderFileSidebar(height int) string {
 	var lines []string
 
 	visible := m.visibleDiffs()
 	hiddenCount := len(m.diffs) - len(visible)
+
+	// Get display names with disambiguation
+	displayNames := getDisplayNames(visible)
 
 	// Sidebar header
 	title := "Files"
@@ -791,8 +847,8 @@ func (m Model) renderFileSidebar(height int) string {
 			indicator = "▶"
 		}
 
-		// File name (basename only for brevity)
-		name := filepath.Base(diff.Path)
+		// File name with disambiguation
+		name := displayNames[diff.Path]
 		if len(name) > sidebarWidth-8 {
 			name = name[:sidebarWidth-11] + "..."
 		}

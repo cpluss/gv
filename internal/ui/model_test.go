@@ -59,3 +59,54 @@ func TestComputeDiffWithOnlyCommits(t *testing.T) {
 
 	t.Log("Selection logic is correct: anyCommitSelected =", anyCommitSelected)
 }
+
+func TestGetDisplayNames(t *testing.T) {
+	tests := []struct {
+		name     string
+		paths    []string
+		expected map[string]string
+	}{
+		{
+			name:  "unique basenames",
+			paths: []string{"src/foo.go", "src/bar.go"},
+			expected: map[string]string{
+				"src/foo.go": "foo.go",
+				"src/bar.go": "bar.go",
+			},
+		},
+		{
+			name:  "duplicate basenames",
+			paths: []string{"src/components/index.ts", "src/pages/index.ts"},
+			expected: map[string]string{
+				"src/components/index.ts": "components/index.ts",
+				"src/pages/index.ts":      "pages/index.ts",
+			},
+		},
+		{
+			name:  "nested duplicates",
+			paths: []string{"a/b/index.ts", "c/b/index.ts", "d/e/index.ts"},
+			expected: map[string]string{
+				"a/b/index.ts": "a/b/index.ts",
+				"c/b/index.ts": "c/b/index.ts",
+				"d/e/index.ts": "e/index.ts",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			diffs := make([]git.FileDiff, len(tt.paths))
+			for i, p := range tt.paths {
+				diffs[i] = git.FileDiff{Path: p}
+			}
+
+			result := getDisplayNames(diffs)
+
+			for path, expectedName := range tt.expected {
+				if result[path] != expectedName {
+					t.Errorf("path %q: got %q, want %q", path, result[path], expectedName)
+				}
+			}
+		})
+	}
+}
