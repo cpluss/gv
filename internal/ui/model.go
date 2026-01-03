@@ -335,6 +335,10 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			m.scroll += count
+			maxScroll := m.getMaxScroll()
+			if m.scroll > maxScroll {
+				m.scroll = maxScroll
+			}
 		}
 	case "k", "up":
 		count := 1
@@ -354,6 +358,10 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "ctrl+d":
 		m.scroll += m.height / 2
+		maxScroll := m.getMaxScroll()
+		if m.scroll > maxScroll {
+			m.scroll = maxScroll
+		}
 	case "ctrl+u":
 		if m.scroll > m.height/2 {
 			m.scroll -= m.height / 2
@@ -379,8 +387,8 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Go to specific line
 				m.scroll = numPrefix - 1 // 1-indexed to 0-indexed
 			} else {
-				// Scroll to end - will be clamped in View
-				m.scroll = 99999
+				// Scroll to end - calculate actual max scroll
+				m.scroll = m.getMaxScroll()
 			}
 		}
 	case "u":
@@ -486,22 +494,29 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		} else {
 			// Scroll in content
 			m.scroll += 3
+			maxScroll := m.getMaxScroll()
+			if m.scroll > maxScroll {
+				m.scroll = maxScroll
+			}
 		}
 	case tea.MouseButtonLeft:
-		if msg.Action == tea.MouseActionRelease {
-			// Determine click location
-			if msg.X < sidebarWidth && msg.Y >= 2 { // Account for header
-				// Click in sidebar - select file
-				fileIdx := msg.Y - 2 // Subtract header lines
-				visible := m.visibleDiffs()
-				if fileIdx >= 0 && fileIdx < len(visible) {
+		// Determine click location
+		// Sidebar layout: Y=0 app header, Y=1 "Files", Y=2 separator, Y=3+ files
+		if msg.X < sidebarWidth && msg.Y >= 3 {
+			fileIdx := msg.Y - 3 // Subtract app header (1) + sidebar header (2)
+			visible := m.visibleDiffs()
+			if fileIdx >= 0 && fileIdx < len(visible) {
+				if msg.Action == tea.MouseActionRelease {
+					// Single click - select file
 					m.fileCursor = fileIdx
 					m.focus = FocusSidebar
+					// Also scroll to this file in content
+					m.scrollToFile(fileIdx)
 				}
-			} else if msg.X >= sidebarWidth {
-				// Click in content area
-				m.focus = FocusContent
 			}
+		} else if msg.X >= sidebarWidth && msg.Action == tea.MouseActionRelease {
+			// Click in content area
+			m.focus = FocusContent
 		}
 	}
 	return m, nil
@@ -630,6 +645,34 @@ func (m *Model) prevFile() {
 		m.fileCursor--
 		m.scrollToFile(m.fileCursor)
 	}
+}
+
+// getMaxScroll calculates the maximum scroll position based on content
+func (m Model) getMaxScroll() int {
+	visible := m.visibleDiffs()
+	totalLines := 0
+	for _, diff := range visible {
+		totalLines++ // File header
+		if diff.Collapsed {
+			totalLines++ // "(collapsed)"
+		} else if diff.IsBinary {
+			totalLines++ // "Binary file"
+		} else {
+			for _, hunk := range diff.Hunks {
+				totalLines += len(hunk.Lines)
+			}
+		}
+	}
+	// Account for visible height
+	contentHeight := m.height - 2
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	maxScroll := totalLines - contentHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	return maxScroll
 }
 
 func (m *Model) scrollToFile(fileIdx int) {
