@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/selund/gv/internal/git"
@@ -100,6 +101,7 @@ type Model struct {
 	// Components
 	styles      Styles
 	highlighter *syntax.Highlighter
+	spinner     spinner.Model
 
 	// Error state
 	err error
@@ -113,9 +115,14 @@ func InitModel() (Model, error) {
 // InitModelWithConfig creates a new model with the given configuration.
 // This returns immediately with a loading state; data is loaded async in Init().
 func InitModelWithConfig(cfg Config) (Model, error) {
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
 	m := Model{
 		styles:       DefaultStyles(),
 		highlighter:  syntax.NewHighlighter(),
+		spinner:      s,
 		viewMode:     ViewDiff,
 		diffMode:     DiffSideBySide,
 		contextLines: 3, // Default context lines
@@ -195,8 +202,8 @@ func findGitRoot(path string) (string, error) {
 
 // Init implements tea.Model
 func (m Model) Init() tea.Cmd {
-	// Load data asynchronously
-	return m.loadDataCmd()
+	// Start spinner and load data asynchronously
+	return tea.Batch(m.spinner.Tick, m.loadDataCmd())
 }
 
 // loadDataCmd returns a command that loads commits and diffs asynchronously
@@ -236,6 +243,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commits = msg.commits
 		m.diffs = msg.diffs
 		m.err = msg.err
+		return m, nil
+	case spinner.TickMsg:
+		if m.loading {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -484,7 +498,7 @@ func (m Model) handleWorktreeSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.viewMode = ViewDiff
 		m.scroll = 0
-		return m, m.loadDataCmd()
+		return m, tea.Batch(m.spinner.Tick, m.loadDataCmd())
 	case "esc":
 		m.viewMode = ViewDiff
 	}
@@ -506,7 +520,7 @@ func (m Model) handleWorktreeListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.viewMode = ViewDiff
 		m.scroll = 0
-		return m, m.loadDataCmd()
+		return m, tea.Batch(m.spinner.Tick, m.loadDataCmd())
 	case "esc":
 		m.viewMode = ViewDiff
 	}
@@ -640,7 +654,7 @@ func (m Model) renderLoading() string {
 	headerText := fmt.Sprintf("gv: %s → %s", branchName, m.mainBranch)
 	header := m.styles.Header.Width(m.width).Render(headerText)
 
-	loadingText := "Loading..."
+	loadingText := m.spinner.View() + " Loading..."
 	content := lipgloss.Place(m.width, m.height-2, lipgloss.Center, lipgloss.Center, loadingText)
 
 	footer := m.styles.Footer.Width(m.width).Render("q: quit")
