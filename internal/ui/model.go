@@ -30,6 +30,11 @@ const (
 	DiffUnified
 )
 
+// Config holds CLI/config file options
+type Config struct {
+	BaseBranch string
+}
+
 // Model is the root application model
 type Model struct {
 	// Window size
@@ -61,8 +66,13 @@ type Model struct {
 	err error
 }
 
-// InitModel creates a new model from the current directory
+// InitModel creates a new model from the current directory with default config
 func InitModel() (Model, error) {
+	return InitModelWithConfig(Config{})
+}
+
+// InitModelWithConfig creates a new model with the given configuration
+func InitModelWithConfig(cfg Config) (Model, error) {
 	m := Model{
 		styles:      DefaultStyles(),
 		highlighter: syntax.NewHighlighter(),
@@ -91,8 +101,12 @@ func InitModel() (Model, error) {
 	m.worktrees = worktrees
 	m.currentWorktree = git.FindCurrentWorktree(worktrees, cwd)
 
-	// Get main branch
-	m.mainBranch = git.GetMainBranch(repoPath)
+	// Get main branch - use config override if provided
+	if cfg.BaseBranch != "" {
+		m.mainBranch = cfg.BaseBranch
+	} else {
+		m.mainBranch = git.GetMainBranch(repoPath)
+	}
 
 	// Load initial data
 	if err := m.loadData(); err != nil {
