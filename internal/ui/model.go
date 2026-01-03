@@ -822,7 +822,13 @@ func (m Model) renderDiff() string {
 
 	// Content area with sidebar
 	contentHeight := m.height - 2 // Account for header and footer
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
 	contentWidth := m.width - sidebarWidth - 1
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
 
 	// Render sidebar
 	sidebar := m.renderFileSidebar(contentHeight)
@@ -890,6 +896,11 @@ func getShortestUniquePath(path string, allPaths []string) string {
 }
 
 func (m Model) renderFileSidebar(height int) string {
+	// Ensure height is positive
+	if height < 1 {
+		height = 1
+	}
+
 	var lines []string
 
 	visible := m.visibleDiffs()
@@ -1022,21 +1033,34 @@ func (m Model) renderDiffContent(height int, width int) string {
 		}
 	}
 
-	// Apply scroll
-	if m.scroll >= len(lines) {
-		m.scroll = len(lines) - 1
+	// Apply scroll with proper bounds checking
+	scroll := m.scroll
+	if scroll < 0 {
+		scroll = 0
 	}
-	if m.scroll < 0 {
-		m.scroll = 0
+	if len(lines) > 0 && scroll >= len(lines) {
+		scroll = len(lines) - 1
 	}
 
-	start := m.scroll
+	// Ensure height is positive
+	if height <= 0 {
+		height = 1
+	}
+
+	start := scroll
 	end := start + height
 	if end > len(lines) {
 		end = len(lines)
 	}
-	if start > len(lines) {
-		start = len(lines)
+	if start >= len(lines) {
+		start = 0
+		if len(lines) > 0 {
+			start = len(lines) - 1
+		}
+		end = len(lines)
+	}
+	if start >= end {
+		return ""
 	}
 
 	visibleLines := lines[start:end]
