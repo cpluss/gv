@@ -57,14 +57,16 @@ impl Widget for Footer<'_> {
         };
 
         // Keybinding hints
+        let ctx = format!("±{}", self.context_lines);
         let hints = [
             ("j/k", "scroll"),
             ("n/N", "file"),
+            ("/", "search"),
             ("u", view_mode),
+            ("[/]", "width"),
+            ("x", ctx.as_str()),
             ("c", "commits"),
-            ("w", "worktree"),
-            ("h", if self.show_hidden { "collapse" } else { "expand" }),
-            ("x", &format!("ctx:{}", self.context_lines)),
+            ("h", if self.show_hidden { "hide" } else { "show" }),
             ("?", "help"),
             ("q", "quit"),
         ];

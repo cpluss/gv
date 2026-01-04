@@ -61,8 +61,71 @@ impl Highlighter {
     /// Highlight lines without maintaining state across lines
     ///
     /// Use this for diff hunks where lines may have gaps between them.
+    #[allow(dead_code)]
     pub fn highlight_lines_stateless(&mut self, cache_key: &str, filename: &str, lines: &[&str]) -> Vec<HighlightedLine> {
         self.highlight_lines_stateful(cache_key, filename, lines, false)
+    }
+
+    /// Highlight multiple hunks - stateful within each hunk, reset between hunks
+    ///
+    /// This preserves multi-line constructs (like block comments) within hunks
+    /// while avoiding corruption from gaps between hunks.
+    pub fn highlight_hunks(&mut self, cache_key: &str, filename: &str, hunks: &[Vec<&str>]) -> Vec<HighlightedLine> {
+        // Check cache first
+        let total_lines: usize = hunks.iter().map(|h| h.len()).sum();
+        if let Some(cached) = self.cache.get(cache_key) {
+            if cached.len() == total_lines {
+                return cached.clone();
+            }
+        }
+
+        let syntax = self.detect_syntax(filename, hunks.first().and_then(|h| h.first().copied()));
+        let theme = &self.theme_set.themes["base16-ocean.dark"];
+
+        let mut result = Vec::with_capacity(total_lines);
+
+        for hunk_lines in hunks {
+            // Fresh highlighter for each hunk - maintains state within hunk only
+            let mut highlighter = HighlightLines::new(syntax, theme);
+
+            for line in hunk_lines {
+                let mut line_with_newline = line.to_string();
+                if !line_with_newline.ends_with('\n') {
+                    line_with_newline.push('\n');
+                }
+
+                match highlighter.highlight_line(&line_with_newline, &self.syntax_set) {
+                    Ok(ranges) => {
+                        let tokens: Vec<Token> = ranges
+                            .into_iter()
+                            .filter_map(|(style, text)| {
+                                let trimmed = text.trim_end_matches(['\n', '\r']);
+                                if trimmed.is_empty() {
+                                    None
+                                } else {
+                                    Some(Token {
+                                        text: trimmed.to_string(),
+                                        style: syntect_style_to_ratatui(style),
+                                    })
+                                }
+                            })
+                            .collect();
+                        result.push(tokens);
+                    }
+                    Err(_) => {
+                        result.push(vec![Token {
+                            text: line.to_string(),
+                            style: RatatuiStyle::default(),
+                        }]);
+                    }
+                }
+            }
+        }
+
+        // Cache the result
+        self.cache.insert(cache_key.to_string(), result.clone());
+
+        result
     }
 
     fn highlight_lines_stateful(&mut self, cache_key: &str, filename: &str, lines: &[&str], stateful: bool) -> Vec<HighlightedLine> {

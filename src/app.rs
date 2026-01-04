@@ -27,7 +27,7 @@ use crate::ui::{
     render_diff_content, render_footer, render_header, render_sidebar,
     render_commit_popup, render_worktree_popup, render_help_popup,
     diff_view::{calculate_total_lines, file_line_count},
-    sidebar::SIDEBAR_WIDTH,
+    DEFAULT_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, SIDEBAR_RESIZE_STEP,
 };
 
 /// View mode for the application
@@ -43,6 +43,8 @@ pub enum ViewMode {
     WorktreeList,
     /// Help overlay
     Help,
+    /// Search mode (vim-like /)
+    Search,
 }
 
 const MOUSE_SCROLL_LINES: i32 = 5;
@@ -86,9 +88,15 @@ pub struct App {
     // Options
     show_hidden: bool,
     context_lines: u32,
+    sidebar_width: u16,
 
     // Filter input (for worktree switcher)
     filter_input: String,
+
+    // Search state
+    search_input: String,
+    search_matches: Vec<usize>, // Indices into flattened tree or diffs
+    search_match_index: usize,
 
     // Number prefix for vim-style jumps
     number_prefix: Option<usize>,
@@ -130,7 +138,11 @@ impl App {
             popup_cursor: 0,
             show_hidden: false,
             context_lines: 3,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             filter_input: String::new(),
+            search_input: String::new(),
+            search_matches: Vec::new(),
+            search_match_index: 0,
             number_prefix: None,
             styles: Styles::new(),
             highlighter: Highlighter::new(),
@@ -221,17 +233,16 @@ impl App {
                 continue;
             }
 
-            let mut lines = Vec::new();
-            for hunk in &diff.hunks {
-                for line in &hunk.lines {
-                    lines.push(line.content.as_str());
-                }
-            }
+            // Collect lines grouped by hunk for proper multi-line construct handling
+            let hunks: Vec<Vec<&str>> = diff.hunks
+                .iter()
+                .map(|hunk| hunk.lines.iter().map(|l| l.content.as_str()).collect())
+                .collect();
 
-            if !lines.is_empty() {
-                // Use stateless highlighting for diff hunks since they may have gaps
-                // (missing context lines) between them that would break stateful highlighting
-                let _ = self.highlighter.highlight_lines_stateless(&diff.path, &diff.path, &lines);
+            if !hunks.is_empty() {
+                // Use per-hunk stateful highlighting - preserves multi-line constructs
+                // (like block comments) within hunks while resetting between hunks
+                let _ = self.highlighter.highlight_hunks(&diff.path, &diff.path, &hunks);
             }
         }
     }
@@ -347,6 +358,10 @@ impl App {
                 self.render_diff_view(frame, area);
                 render_help_popup(frame.buffer_mut(), area, &self.styles);
             }
+            ViewMode::Search => {
+                self.render_diff_view(frame, area);
+                self.render_search_bar(frame.buffer_mut(), area);
+            }
         }
     }
 
@@ -370,7 +385,7 @@ impl App {
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(SIDEBAR_WIDTH),
+                Constraint::Length(self.sidebar_width),
                 Constraint::Min(0),
             ])
             .split(content_area);
@@ -451,6 +466,40 @@ impl App {
         render_worktree_popup(frame.buffer_mut(), area, &self.worktrees, self.popup_cursor, &self.filter_input, &self.styles);
     }
 
+    /// Render search bar at the bottom of the screen
+    fn render_search_bar(&self, buf: &mut ratatui::buffer::Buffer, area: Rect) {
+        use ratatui::text::{Line, Span};
+
+        // Draw search bar at the bottom (over the footer)
+        let y = area.height.saturating_sub(1);
+
+        // Clear the line
+        for x in 0..area.width {
+            buf[(x, y)].set_char(' ').set_style(self.styles.popup);
+        }
+
+        // Build the search line: "/" + input + match count
+        let mut spans = Vec::new();
+        spans.push(Span::styled("/", self.styles.popup_title));
+        spans.push(Span::styled(&self.search_input, self.styles.popup));
+        spans.push(Span::styled("_", self.styles.popup_title)); // Cursor indicator
+
+        // Show match count
+        let match_info = if self.search_matches.is_empty() {
+            if self.search_input.is_empty() {
+                String::new()
+            } else {
+                " (no matches)".to_string()
+            }
+        } else {
+            format!(" ({}/{})", self.search_match_index + 1, self.search_matches.len())
+        };
+        spans.push(Span::styled(match_info, self.styles.line_number));
+
+        let line = Line::from(spans);
+        buf.set_line(0, y, &line, area.width);
+    }
+
     /// Get the file at the current scroll position
     fn get_current_file(&self) -> Option<String> {
         self.get_file_at_position(self.content_scroll)
@@ -484,6 +533,7 @@ impl App {
             ViewMode::WorktreeSwitcher => self.handle_worktree_switcher_key(key),
             ViewMode::WorktreeList => self.handle_worktree_list_key(key),
             ViewMode::Help => self.handle_help_key(key),
+            ViewMode::Search => self.handle_search_key(key),
         }
     }
 
@@ -608,6 +658,14 @@ impl App {
                 self.show_hidden = !self.show_hidden;
                 self.toggle_hidden_files();
             }
+            (KeyCode::Char('['), _) => {
+                // Shrink sidebar
+                self.resize_sidebar(-1);
+            }
+            (KeyCode::Char(']'), _) => {
+                // Expand sidebar
+                self.resize_sidebar(1);
+            }
             (KeyCode::Char(' '), _) => {
                 if self.focus == FocusArea::Sidebar {
                     self.toggle_sidebar_node();
@@ -640,6 +698,12 @@ impl App {
             }
             (KeyCode::Char('?'), _) => {
                 self.view_mode = ViewMode::Help;
+            }
+            (KeyCode::Char('/'), _) => {
+                self.view_mode = ViewMode::Search;
+                self.search_input.clear();
+                self.search_matches.clear();
+                self.search_match_index = 0;
             }
 
             _ => {}
@@ -771,18 +835,117 @@ impl App {
         false
     }
 
+    /// Handle keys in search mode
+    fn handle_search_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.view_mode = ViewMode::Diff;
+                self.search_input.clear();
+            }
+            KeyCode::Enter => {
+                // Confirm search and jump to first match
+                if !self.search_matches.is_empty() {
+                    self.jump_to_search_match(0);
+                }
+                self.view_mode = ViewMode::Diff;
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Next match while in search mode
+                self.next_search_match();
+            }
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Previous match while in search mode
+                self.prev_search_match();
+            }
+            KeyCode::Char(c) => {
+                self.search_input.push(c);
+                self.update_search_matches();
+            }
+            KeyCode::Backspace => {
+                self.search_input.pop();
+                self.update_search_matches();
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Update search matches based on current input
+    fn update_search_matches(&mut self) {
+        self.search_matches.clear();
+        self.search_match_index = 0;
+
+        if self.search_input.is_empty() {
+            return;
+        }
+
+        let query = self.search_input.to_lowercase();
+
+        // Search in file tree (file names and paths)
+        let tree = flatten_tree(&self.file_tree);
+        for (i, node) in tree.iter().enumerate() {
+            if node.name.to_lowercase().contains(&query)
+                || node.path.to_lowercase().contains(&query)
+            {
+                self.search_matches.push(i);
+            }
+        }
+    }
+
+    /// Jump to a specific search match
+    fn jump_to_search_match(&mut self, match_index: usize) {
+        if let Some(&tree_index) = self.search_matches.get(match_index) {
+            self.search_match_index = match_index;
+            self.file_cursor = tree_index;
+            self.focus = FocusArea::Sidebar;
+
+            // Ensure the match is visible
+            let visible = self.sidebar_visible_height();
+            if self.file_cursor < self.sidebar_scroll {
+                self.sidebar_scroll = self.file_cursor;
+            } else if self.file_cursor >= self.sidebar_scroll + visible {
+                self.sidebar_scroll = self.file_cursor.saturating_sub(visible - 1);
+            }
+
+            // Also jump to the file in content view
+            self.jump_to_sidebar_selection();
+        }
+    }
+
+    /// Go to next search match
+    fn next_search_match(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let next = (self.search_match_index + 1) % self.search_matches.len();
+        self.jump_to_search_match(next);
+    }
+
+    /// Go to previous search match
+    fn prev_search_match(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let prev = if self.search_match_index == 0 {
+            self.search_matches.len() - 1
+        } else {
+            self.search_match_index - 1
+        };
+        self.jump_to_search_match(prev);
+    }
+
     /// Handle mouse input
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                if mouse.column < SIDEBAR_WIDTH {
+                if mouse.column < self.sidebar_width {
                     self.scroll_sidebar(MOUSE_SCROLL_LINES);
                 } else {
                     self.scroll_content(MOUSE_SCROLL_LINES);
                 }
             }
             MouseEventKind::ScrollUp => {
-                if mouse.column < SIDEBAR_WIDTH {
+                if mouse.column < self.sidebar_width {
                     self.scroll_sidebar(-MOUSE_SCROLL_LINES);
                 } else {
                     self.scroll_content(-MOUSE_SCROLL_LINES);
@@ -790,7 +953,7 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 // Check if click is in sidebar
-                if mouse.column < SIDEBAR_WIDTH {
+                if mouse.column < self.sidebar_width {
                     self.focus = FocusArea::Sidebar;
                     self.handle_sidebar_click(mouse.row);
                 } else {
@@ -941,6 +1104,17 @@ impl App {
             }
         }
         self.set_content_scroll(self.content_scroll);
+    }
+
+    /// Resize sidebar by delta steps
+    fn resize_sidebar(&mut self, delta: i32) {
+        let step = SIDEBAR_RESIZE_STEP as i32;
+        let new_width = if delta > 0 {
+            self.sidebar_width.saturating_add((delta * step) as u16)
+        } else {
+            self.sidebar_width.saturating_sub((-delta * step) as u16)
+        };
+        self.sidebar_width = new_width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
     }
 
     fn sidebar_len(&self) -> usize {

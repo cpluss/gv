@@ -11,8 +11,16 @@ use ratatui::{
 
 use super::{Styles, TreeNode};
 
-/// Sidebar width constant
-pub const SIDEBAR_WIDTH: u16 = 35;
+/// Default sidebar width
+pub const DEFAULT_SIDEBAR_WIDTH: u16 = 35;
+/// Minimum sidebar width
+pub const MIN_SIDEBAR_WIDTH: u16 = 20;
+/// Maximum sidebar width
+pub const MAX_SIDEBAR_WIDTH: u16 = 80;
+/// Sidebar resize increment
+pub const SIDEBAR_RESIZE_STEP: u16 = 5;
+/// Maximum visual indentation depth (to prevent deep files from being invisible)
+const MAX_VISUAL_INDENT: usize = 6;
 
 /// Sidebar widget showing file tree
 pub struct Sidebar<'a> {
@@ -73,9 +81,18 @@ impl Widget for Sidebar<'_> {
             // Build the line
             let mut spans = Vec::new();
 
-            // Indentation
-            let indent = "  ".repeat(node.depth);
+            // Indentation (capped to prevent deep files from being invisible)
+            let visual_depth = node.depth.min(MAX_VISUAL_INDENT);
+            let indent = "  ".repeat(visual_depth);
             spans.push(Span::styled(indent, style));
+
+            // Depth indicator for very deep items
+            if node.depth > MAX_VISUAL_INDENT {
+                spans.push(Span::styled(
+                    format!("{}·", node.depth - MAX_VISUAL_INDENT),
+                    self.styles.line_number,
+                ));
+            }
 
             // Folder icon or file indicator
             if node.is_folder {
@@ -85,9 +102,16 @@ impl Widget for Sidebar<'_> {
                 spans.push(Span::styled("  ", style));
             }
 
-            // Name
-            let max_name_width = (inner.width as usize).saturating_sub(node.depth * 2 + 12);
-            let name = truncate(&node.name, max_name_width);
+            // Name - calculate available space accounting for capped indent and depth indicator
+            let indent_width = visual_depth * 2;
+            let depth_indicator_width = if node.depth > MAX_VISUAL_INDENT {
+                format!("{}·", node.depth - MAX_VISUAL_INDENT).len()
+            } else {
+                0
+            };
+            let max_name_width = (inner.width as usize)
+                .saturating_sub(indent_width + depth_indicator_width + 12);
+            let name = smart_truncate(&node.name, max_name_width);
             spans.push(Span::styled(name, style));
 
             // Stats
@@ -123,15 +147,34 @@ impl Widget for Sidebar<'_> {
     }
 }
 
-/// Truncate a string to a maximum width
-fn truncate(s: &str, max_width: usize) -> String {
+/// Smart truncate: shows beginning...end for better context
+///
+/// For "very_long_filename.tsx" with max 12:
+/// - Old: "very_long..." (loses extension info)
+/// - New: "very...e.tsx" (preserves extension)
+fn smart_truncate(s: &str, max_width: usize) -> String {
     if s.len() <= max_width {
-        s.to_string()
-    } else if max_width > 3 {
-        format!("{}...", &s[..max_width - 3])
-    } else {
-        s[..max_width].to_string()
+        return s.to_string();
     }
+
+    if max_width < 5 {
+        // Too small for smart truncation
+        return s.chars().take(max_width).collect();
+    }
+
+    // For filenames, try to preserve the extension
+    let ellipsis = "…"; // Single character ellipsis
+    let available = max_width - 1; // Space minus ellipsis
+
+    // Split into prefix and suffix
+    // Allocate more to the beginning (where the unique part usually is)
+    let prefix_len = (available * 2) / 3;
+    let suffix_len = available - prefix_len;
+
+    let prefix: String = s.chars().take(prefix_len).collect();
+    let suffix: String = s.chars().rev().take(suffix_len).collect::<String>().chars().rev().collect();
+
+    format!("{}{}{}", prefix, ellipsis, suffix)
 }
 
 /// Render the sidebar

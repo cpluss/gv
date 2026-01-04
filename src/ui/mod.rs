@@ -17,7 +17,10 @@ mod file_tree;
 
 pub use styles::Styles;
 pub use diff_view::{render_diff_content, DiffMode};
-pub use sidebar::render_sidebar;
+pub use sidebar::{
+    render_sidebar, DEFAULT_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH,
+    MAX_SIDEBAR_WIDTH, SIDEBAR_RESIZE_STEP,
+};
 pub use header::render_header;
 pub use footer::{render_footer, FocusArea};
 pub use popup::{render_commit_popup, render_worktree_popup, render_help_popup};

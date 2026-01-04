@@ -188,7 +188,7 @@ pub fn render_worktree_popup(
 /// Render help overlay
 pub fn render_help_popup(buf: &mut Buffer, area: Rect, styles: &Styles) {
     let width = 50.min(area.width - 4);
-    let height = 22.min(area.height - 4);
+    let height = 24.min(area.height - 4);
 
     let inner = render_centered_popup(buf, area, width, height, "Help", styles);
 
@@ -204,6 +204,8 @@ pub fn render_help_popup(buf: &mut Buffer, area: Rect, styles: &Styles) {
         ("View", ""),
         ("u", "Cycle view (split/unified/full)"),
         ("x", "Cycle context lines"),
+        ("[/]", "Resize sidebar"),
+        ("/", "Search files"),
         ("Space", "Collapse/expand file"),
         ("z", "Collapse/expand all"),
         ("h", "Toggle hidden files"),
