@@ -1,5 +1,6 @@
 # Binary (at repo root only)
 /gv
+/target/
 
 # IDE
 .idea/
