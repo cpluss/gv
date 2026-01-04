@@ -342,6 +342,10 @@ fn render_unified_line(
         return;
     }
 
+    for i in content_x..(content_x + content_width) {
+        buf[(i, y)].set_char(' ').set_style(line_style);
+    }
+
     let spans = highlight_spans(
         filename,
         line_index,
@@ -402,6 +406,10 @@ fn render_side_column(
                 let content = truncate_str(&l.content, content_width as usize);
                 buf.set_line(content_x, y, &Line::styled(content, styles.hunk_header), content_width);
                 return;
+            }
+
+            for i in content_x..(content_x + content_width) {
+                buf[(i, y)].set_char(' ').set_style(line_style);
             }
 
             let spans = highlight_spans(

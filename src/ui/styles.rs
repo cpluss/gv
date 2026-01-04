@@ -14,7 +14,9 @@ pub mod colors {
     pub const DIM: Color = Color::DarkGray;
 
     // Diff colors (delta-like palette)
+    pub const ADDED_BG: Color = Color::Rgb(20, 70, 40);
     pub const ADDED_FG: Color = Color::Rgb(120, 200, 120);
+    pub const REMOVED_BG: Color = Color::Rgb(80, 32, 32);
     pub const REMOVED_FG: Color = Color::Rgb(200, 120, 120);
 
     // Gutter colors
@@ -130,8 +132,12 @@ impl Styles {
 
             // Diff content
             line_number: Style::default().fg(colors::LINE_NUMBER),
-            line_added: Style::default().fg(colors::ADDED_FG),
-            line_removed: Style::default().fg(colors::REMOVED_FG),
+            line_added: Style::default()
+                .bg(colors::ADDED_BG)
+                .fg(colors::ADDED_FG),
+            line_removed: Style::default()
+                .bg(colors::REMOVED_BG)
+                .fg(colors::REMOVED_FG),
             line_context: Style::default().fg(colors::FG),
             gutter_added: Style::default().fg(colors::GUTTER_ADDED),
             gutter_removed: Style::default().fg(colors::GUTTER_REMOVED),
