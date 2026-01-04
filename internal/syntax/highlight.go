@@ -1,48 +1,50 @@
 package syntax
 
 import (
+	"bytes"
 	"path/filepath"
 	"strings"
 
 	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 )
 
 // Highlighter provides syntax highlighting for diff content
 type Highlighter struct {
-	style *chroma.Style
+	style     *chroma.Style
+	formatter chroma.Formatter
 }
 
 // NewHighlighter creates a new syntax highlighter
 func NewHighlighter() *Highlighter {
+	style := styles.Get("github-dark")
+	if style == nil {
+		style = styles.Fallback
+	}
 	return &Highlighter{
-		style: styles.Get("monokai"),
+		style:     style,
+		formatter: formatters.TTY16m,
 	}
 }
 
 // HighlightedLine represents a line with syntax highlighting tokens
 type HighlightedLine struct {
-	Tokens []Token
-}
-
-// Token represents a syntax-highlighted token
-type Token struct {
-	Text  string
-	Style TokenStyle
-}
-
-// TokenStyle contains styling information for a token
-type TokenStyle struct {
-	Color     string
-	Bold      bool
-	Italic    bool
-	Underline bool
+	Text string
 }
 
 // HighlightLines highlights multiple lines of code for a given filename
 func (h *Highlighter) HighlightLines(filename string, lines []string) []HighlightedLine {
 	result := make([]HighlightedLine, len(lines))
+	if len(lines) == 0 {
+		return result
+	}
+
+	normalizedLines := make([]string, len(lines))
+	for i, line := range lines {
+		normalizedLines[i] = strings.ReplaceAll(line, "\t", "    ")
+	}
 
 	// Get lexer for file type
 	lexer := lexers.Match(filename)
@@ -52,59 +54,47 @@ func (h *Highlighter) HighlightLines(filename string, lines []string) []Highligh
 	lexer = chroma.Coalesce(lexer)
 
 	// Join lines for tokenization
-	content := strings.Join(lines, "\n")
+	content := strings.Join(normalizedLines, "\n")
 
 	// Tokenize
 	iterator, err := lexer.Tokenise(nil, content)
 	if err != nil {
 		// Fall back to plain text
-		for i, line := range lines {
+		for i, line := range normalizedLines {
 			result[i] = HighlightedLine{
-				Tokens: []Token{{Text: line}},
+				Text: line,
 			}
 		}
 		return result
 	}
 
-	// Split tokens back to lines
-	lineIdx := 0
-	for _, token := range iterator.Tokens() {
-		style := h.tokenStyle(token.Type)
+	var buf bytes.Buffer
+	if err := h.formatter.Format(&buf, h.style, iterator); err != nil {
+		for i, line := range normalizedLines {
+			result[i] = HighlightedLine{
+				Text: line,
+			}
+		}
+		return result
+	}
 
-		// Handle multi-line tokens
-		parts := strings.Split(token.Value, "\n")
-		for i, part := range parts {
-			if i > 0 {
-				lineIdx++
-				if lineIdx >= len(result) {
-					break
-				}
+	highlightedLines := strings.Split(buf.String(), "\n")
+	if len(highlightedLines) > len(lines) {
+		highlightedLines = highlightedLines[:len(lines)]
+	}
+	for i, line := range normalizedLines {
+		if i < len(highlightedLines) {
+			result[i] = HighlightedLine{
+				Text: highlightedLines[i],
 			}
-			if lineIdx < len(result) && part != "" {
-				result[lineIdx].Tokens = append(result[lineIdx].Tokens, Token{
-					Text:  part,
-					Style: style,
-				})
-			}
+			continue
+		}
+		result[i] = HighlightedLine{
+			Text: line,
 		}
 	}
 
 	return result
-}
-
-// tokenStyle converts a chroma token type to our TokenStyle
-func (h *Highlighter) tokenStyle(t chroma.TokenType) TokenStyle {
-	entry := h.style.Get(t)
-	style := TokenStyle{}
-
-	if entry.Colour.IsSet() {
-		style.Color = entry.Colour.String()
-	}
-	style.Bold = entry.Bold == chroma.Yes
-	style.Italic = entry.Italic == chroma.Yes
-	style.Underline = entry.Underline == chroma.Yes
-
-	return style
 }
 
 // DetectLanguage returns the detected language for a filename

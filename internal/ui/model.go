@@ -8,8 +8,10 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/selund/gv/internal/git"
 	"github.com/selund/gv/internal/syntax"
 )
@@ -46,6 +48,13 @@ type dataLoadedMsg struct {
 	err            error
 }
 
+type diffUpdatedMsg struct {
+	diffs          []git.FileDiff
+	highlightCache map[string][]syntax.HighlightedLine
+	err            error
+	generation     int
+}
+
 // FocusArea represents which pane has focus
 type FocusArea int
 
@@ -58,14 +67,14 @@ const sidebarWidth = 35
 
 // TreeNode represents a folder or file in the file tree
 type TreeNode struct {
-	Name       string
-	Path       string      // Full path (empty for folders)
-	IsFolder   bool
-	Children   []*TreeNode
-	FileIdx    int         // Index in visible diffs (for files only, -1 for folders)
-	Expanded   bool        // For folders: is it expanded?
-	Added      int         // Aggregated stats for folders
-	Removed    int
+	Name     string
+	Path     string // Full path (empty for folders)
+	IsFolder bool
+	Children []*TreeNode
+	FileIdx  int  // Index in visible diffs (for files only, -1 for folders)
+	Expanded bool // For folders: is it expanded?
+	Added    int  // Aggregated stats for folders
+	Removed  int
 }
 
 // hiddenPatterns are file patterns hidden by default
@@ -100,7 +109,6 @@ type Model struct {
 	// View state
 	viewMode     ViewMode
 	diffMode     DiffMode
-	scroll       int
 	cursor       int // For popups
 	fileCursor   int // For file sidebar
 	focus        FocusArea
@@ -116,6 +124,14 @@ type Model struct {
 
 	// Cached syntax highlighting (computed once when diffs load)
 	highlightCache map[string][]syntax.HighlightedLine
+
+	// Rendered content
+	contentViewport     viewport.Model
+	contentDirty        bool
+	renderedFileOffsets []int
+
+	// Async diff computation generation
+	diffGeneration int
 
 	// Components
 	styles      Styles
@@ -142,6 +158,7 @@ func InitModelWithConfig(cfg Config) (Model, error) {
 		styles:          DefaultStyles(),
 		highlighter:     syntax.NewHighlighter(),
 		spinner:         s,
+		contentViewport: viewport.New(0, 0),
 		viewMode:        ViewDiff,
 		diffMode:        DiffSideBySide,
 		contextLines:    3, // Default context lines
@@ -250,22 +267,7 @@ func (m Model) loadDataCmd() tea.Cmd {
 		}
 
 		// Pre-compute syntax highlighting for all files
-		cache := make(map[string][]syntax.HighlightedLine)
-		for _, diff := range diffs {
-			if diff.IsBinary {
-				continue
-			}
-			// Collect all line contents for this file
-			var allLines []string
-			for _, hunk := range diff.Hunks {
-				for _, line := range hunk.Lines {
-					allLines = append(allLines, line.Content)
-				}
-			}
-			if len(allLines) > 0 {
-				cache[diff.Path] = highlighter.HighlightLines(diff.Path, allLines)
-			}
-		}
+		cache := buildHighlightCache(highlighter, diffs)
 
 		return dataLoadedMsg{
 			commits:        commits,
@@ -273,6 +275,59 @@ func (m Model) loadDataCmd() tea.Cmd {
 			highlightCache: cache,
 		}
 	}
+}
+
+func buildHighlightCache(highlighter *syntax.Highlighter, diffs []git.FileDiff) map[string][]syntax.HighlightedLine {
+	cache := make(map[string][]syntax.HighlightedLine)
+	for _, diff := range diffs {
+		if diff.IsBinary {
+			continue
+		}
+		// Collect all line contents for this file
+		var allLines []string
+		for _, hunk := range diff.Hunks {
+			for _, line := range hunk.Lines {
+				allLines = append(allLines, line.Content)
+			}
+		}
+		if len(allLines) > 0 {
+			cache[diff.Path] = highlighter.HighlightLines(diff.Path, allLines)
+		}
+	}
+	return cache
+}
+
+func (m Model) recomputeDiffCmd(generation int) tea.Cmd {
+	if len(m.worktrees) == 0 {
+		return func() tea.Msg {
+			return diffUpdatedMsg{generation: generation}
+		}
+	}
+
+	wtPath := m.worktrees[m.currentWorktree].Path
+	commits := make([]git.Commit, len(m.commits))
+	copy(commits, m.commits)
+	contextLines := m.contextLines
+	mainBranch := m.mainBranch
+	highlighter := m.highlighter
+
+	return func() tea.Msg {
+		diffs, err := git.ComputeDiffWithContext(wtPath, mainBranch, commits, contextLines)
+		if err != nil {
+			return diffUpdatedMsg{err: err, generation: generation}
+		}
+		cache := buildHighlightCache(highlighter, diffs)
+		return diffUpdatedMsg{
+			diffs:          diffs,
+			highlightCache: cache,
+			generation:     generation,
+		}
+	}
+}
+
+func (m *Model) startDiffRecompute() tea.Cmd {
+	m.diffGeneration++
+	return m.recomputeDiffCmd(m.diffGeneration)
 }
 
 // Update implements tea.Model
@@ -284,6 +339,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.diffs = msg.diffs
 		m.highlightCache = msg.highlightCache
 		m.err = msg.err
+		m.contentDirty = true
+		m.refreshContent()
+		return m, nil
+	case diffUpdatedMsg:
+		if msg.generation != m.diffGeneration {
+			return m, nil
+		}
+		m.diffs = msg.diffs
+		m.highlightCache = msg.highlightCache
+		m.err = msg.err
+		m.contentDirty = true
+		m.refreshContent()
 		return m, nil
 	case spinner.TickMsg:
 		if m.loading {
@@ -299,6 +366,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.contentDirty = true
+		m.refreshContent()
 		return m, nil
 	}
 	return m, nil
@@ -338,6 +407,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+	var cmd tea.Cmd
 
 	// Collect digits into number buffer
 	if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
@@ -375,11 +445,7 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.fileCursor = 0
 			}
 		} else {
-			m.scroll += count
-			maxScroll := m.getMaxScroll()
-			if m.scroll > maxScroll {
-				m.scroll = maxScroll
-			}
+			m.contentViewport.SetYOffset(m.contentViewport.YOffset + count)
 		}
 	case "k", "up":
 		count := 1
@@ -392,28 +458,25 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.fileCursor = 0
 			}
 		} else {
-			m.scroll -= count
-			if m.scroll < 0 {
-				m.scroll = 0
-			}
+			m.contentViewport.SetYOffset(m.contentViewport.YOffset - count)
 		}
 	case "ctrl+d":
-		m.scroll += m.height / 2
-		maxScroll := m.getMaxScroll()
-		if m.scroll > maxScroll {
-			m.scroll = maxScroll
+		delta := m.contentViewport.Height / 2
+		if delta < 1 {
+			delta = 1
 		}
+		m.contentViewport.SetYOffset(m.contentViewport.YOffset + delta)
 	case "ctrl+u":
-		if m.scroll > m.height/2 {
-			m.scroll -= m.height / 2
-		} else {
-			m.scroll = 0
+		delta := m.contentViewport.Height / 2
+		if delta < 1 {
+			delta = 1
 		}
+		m.contentViewport.SetYOffset(m.contentViewport.YOffset - delta)
 	case "g":
 		if m.focus == FocusSidebar {
 			m.fileCursor = 0
 		} else {
-			m.scroll = 0
+			m.contentViewport.GotoTop()
 		}
 	case "G":
 		if m.focus == FocusSidebar {
@@ -426,10 +489,10 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			if numPrefix > 0 {
 				// Go to specific line
-				m.scroll = numPrefix - 1 // 1-indexed to 0-indexed
+				m.contentViewport.SetYOffset(numPrefix - 1) // 1-indexed to 0-indexed
 			} else {
-				// Scroll to end - calculate actual max scroll
-				m.scroll = m.getMaxScroll()
+				// Scroll to end
+				m.contentViewport.GotoBottom()
 			}
 		}
 	case "u":
@@ -438,6 +501,8 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.diffMode = DiffSideBySide
 		}
+		m.contentDirty = true
+		m.refreshContent()
 	case "c":
 		m.viewMode = ViewCommitFilter
 		m.cursor = 0
@@ -465,6 +530,8 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						break
 					}
 				}
+				m.contentDirty = true
+				m.refreshContent()
 			}
 		}
 	case "enter":
@@ -475,9 +542,13 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.focus = FocusContent
 		} else {
 			m.toggleCurrentFile()
+			m.contentDirty = true
+			m.refreshContent()
 		}
 	case "z":
 		m.toggleAllFiles()
+		m.contentDirty = true
+		m.refreshContent()
 	case "h":
 		m.showHidden = !m.showHidden
 		// Clamp file cursor to visible range
@@ -488,6 +559,8 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.fileCursor = 0
 			}
 		}
+		m.contentDirty = true
+		m.refreshContent()
 	case "x":
 		// Toggle context lines: 3 -> 1 -> 0 -> 3
 		switch m.contextLines {
@@ -498,9 +571,9 @@ func (m Model) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			m.contextLines = 3
 		}
-		m.recomputeDiff()
+		cmd = m.startDiffRecompute()
 	}
-	return m, nil
+	return m, cmd
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -518,12 +591,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			// Scroll in content
-			if m.scroll > 0 {
-				m.scroll -= 3
-				if m.scroll < 0 {
-					m.scroll = 0
-				}
-			}
+			m.contentViewport.SetYOffset(m.contentViewport.YOffset - 3)
 		}
 	case tea.MouseButtonWheelDown:
 		if msg.X < sidebarWidth {
@@ -534,11 +602,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			// Scroll in content
-			m.scroll += 3
-			maxScroll := m.getMaxScroll()
-			if m.scroll > maxScroll {
-				m.scroll = maxScroll
-			}
+			m.contentViewport.SetYOffset(m.contentViewport.YOffset + 3)
 		}
 	case tea.MouseButtonLeft:
 		// Determine click location
@@ -562,6 +626,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleCommitFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg.String() {
 	case "j", "down":
 		if m.cursor < len(m.commits)-1 {
@@ -574,22 +639,22 @@ func (m Model) handleCommitFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ":
 		if m.cursor < len(m.commits) {
 			m.commits[m.cursor].Selected = !m.commits[m.cursor].Selected
-			m.recomputeDiff()
+			cmd = m.startDiffRecompute()
 		}
 	case "a":
 		for i := range m.commits {
 			m.commits[i].Selected = true
 		}
-		m.recomputeDiff()
+		cmd = m.startDiffRecompute()
 	case "n":
 		for i := range m.commits {
 			m.commits[i].Selected = false
 		}
-		m.recomputeDiff()
+		cmd = m.startDiffRecompute()
 	case "enter", "esc":
 		m.viewMode = ViewDiff
 	}
-	return m, nil
+	return m, cmd
 }
 
 func (m Model) handleWorktreeSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -606,7 +671,8 @@ func (m Model) handleWorktreeSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.currentWorktree = m.cursor
 		m.loading = true
 		m.viewMode = ViewDiff
-		m.scroll = 0
+		m.diffGeneration++
+		m.contentViewport.GotoTop()
 		return m, tea.Batch(m.spinner.Tick, m.loadDataCmd())
 	case "esc":
 		m.viewMode = ViewDiff
@@ -628,22 +694,13 @@ func (m Model) handleWorktreeListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.currentWorktree = m.cursor
 		m.loading = true
 		m.viewMode = ViewDiff
-		m.scroll = 0
+		m.diffGeneration++
+		m.contentViewport.GotoTop()
 		return m, tea.Batch(m.spinner.Tick, m.loadDataCmd())
 	case "esc":
 		m.viewMode = ViewDiff
 	}
 	return m, nil
-}
-
-func (m *Model) recomputeDiff() {
-	wt := m.worktrees[m.currentWorktree]
-	diffs, err := git.ComputeDiffWithContext(wt.Path, m.mainBranch, m.commits, m.contextLines)
-	if err != nil {
-		m.err = err
-		return
-	}
-	m.diffs = diffs
 }
 
 // isHiddenFile checks if a file matches hidden patterns
@@ -686,41 +743,18 @@ func (m *Model) prevFile() {
 	}
 }
 
-// getMaxScroll calculates the maximum scroll position based on content
-func (m Model) getMaxScroll() int {
-	visible := m.visibleDiffs()
-	totalLines := 0
-	for _, diff := range visible {
-		totalLines++ // File header
-		if diff.Collapsed {
-			totalLines++ // "(collapsed)"
-		} else if diff.IsBinary {
-			totalLines++ // "Binary file"
-		} else {
-			for _, hunk := range diff.Hunks {
-				totalLines += len(hunk.Lines)
-			}
-		}
-	}
-	// Account for visible height
-	contentHeight := m.height - 2
-	if contentHeight < 1 {
-		contentHeight = 1
-	}
-	maxScroll := totalLines - contentHeight
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	return maxScroll
-}
-
 func (m *Model) scrollToFile(fileIdx int) {
+	if fileIdx >= 0 && fileIdx < len(m.renderedFileOffsets) {
+		m.contentViewport.SetYOffset(m.renderedFileOffsets[fileIdx])
+		return
+	}
+
 	visible := m.visibleDiffs()
 	// Calculate scroll position for given file
 	line := 0
 	for i, diff := range visible {
 		if i == fileIdx {
-			m.scroll = line
+			m.contentViewport.SetYOffset(line)
 			return
 		}
 		line++ // File header
@@ -743,6 +777,21 @@ func (m Model) getCurrentFileAtScroll() int {
 		return -1
 	}
 
+	if len(m.renderedFileOffsets) == len(visible) {
+		scrollOffset := m.contentViewport.YOffset
+		current := -1
+		for i, offset := range m.renderedFileOffsets {
+			if scrollOffset < offset {
+				break
+			}
+			current = i
+		}
+		if current >= 0 {
+			return current
+		}
+	}
+
+	scrollOffset := m.contentViewport.YOffset
 	line := 0
 	for i, diff := range visible {
 		fileStart := line
@@ -759,7 +808,7 @@ func (m Model) getCurrentFileAtScroll() int {
 		}
 
 		// Check if scroll position is within this file's range
-		if m.scroll >= fileStart && m.scroll < line {
+		if scrollOffset >= fileStart && scrollOffset < line {
 			return i
 		}
 	}
@@ -824,12 +873,12 @@ func (m Model) renderLoading() string {
 		branchName = m.worktrees[m.currentWorktree].Branch
 	}
 	headerText := fmt.Sprintf("gv: %s → %s", branchName, m.mainBranch)
-	header := m.styles.Header.Width(m.width).Render(headerText)
+	header := m.styles.Header.Width(m.width).MaxWidth(m.width).Render(headerText)
 
 	loadingText := m.spinner.View() + " Loading..."
 	content := lipgloss.Place(m.width, m.height-2, lipgloss.Center, lipgloss.Center, loadingText)
 
-	footer := m.styles.Footer.Width(m.width).Render("q: quit")
+	footer := m.styles.Footer.Width(m.width).MaxWidth(m.width).Render("q: quit")
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
 }
@@ -875,6 +924,37 @@ func (m Model) renderWithOverlay(popup string) string {
 	}
 
 	return strings.Join(bgLines, "\n")
+}
+
+func (m *Model) refreshContent() {
+	if m.width == 0 || m.height == 0 {
+		return
+	}
+
+	contentHeight := m.height - 2
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	contentWidth := m.width - sidebarWidth - 1
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+
+	widthChanged := m.contentViewport.Width != contentWidth
+	heightChanged := m.contentViewport.Height != contentHeight
+
+	m.contentViewport.Width = contentWidth
+	m.contentViewport.Height = contentHeight
+
+	if m.contentDirty || widthChanged {
+		content := m.buildDiffContent(contentWidth)
+		m.contentViewport.SetContent(content)
+		m.contentDirty = false
+	}
+
+	if widthChanged || heightChanged {
+		m.contentViewport.SetYOffset(m.contentViewport.YOffset)
+	}
 }
 
 func (m Model) renderDiff() string {
@@ -938,7 +1018,7 @@ func (m Model) renderDiff() string {
 		currentFileText = fmt.Sprintf("  │  %s %s", fileName, fileStats)
 	}
 
-	header = m.styles.Header.Width(m.width).Render(headerText + "  " + statsText + currentFileText)
+	header = m.styles.Header.Width(m.width).MaxWidth(m.width).Render(headerText + "  " + statsText + currentFileText)
 
 	// Footer
 	focusHint := "Tab: switch pane"
@@ -948,23 +1028,19 @@ func (m Model) renderDiff() string {
 		focusHint = "[Content] " + focusHint
 	}
 	footerText := focusHint + "  j/k: scroll  c: commits  w: worktrees  u: unified  ?: help  q: quit"
-	footer = m.styles.Footer.Width(m.width).Render(footerText)
+	footer = m.styles.Footer.Width(m.width).MaxWidth(m.width).Render(footerText)
 
 	// Content area with sidebar
 	contentHeight := m.height - 2 // Account for header and footer
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
-	contentWidth := m.width - sidebarWidth - 1
-	if contentWidth < 1 {
-		contentWidth = 1
-	}
 
 	// Render sidebar
 	sidebar := m.renderFileSidebar(contentHeight)
 
 	// Render diff content
-	content := m.renderDiffContent(contentHeight, contentWidth)
+	content := m.renderDiffContent()
 
 	// Join sidebar and content horizontally
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, content)
@@ -1188,20 +1264,24 @@ func (m Model) renderFileSidebar(height int) string {
 		Width(sidebarWidth).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderRight(true).
-		BorderForeground(lipgloss.Color("238"))
+		BorderForeground(lipgloss.Color("#30363d"))
 
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	return sidebarStyle.Render(content)
 }
 
-func (m Model) renderDiffContent(height int, width int) string {
+func (m *Model) buildDiffContent(width int) string {
 	visible := m.visibleDiffs()
 	if len(visible) == 0 {
+		m.renderedFileOffsets = nil
+		if width < 1 {
+			width = 1
+		}
 		if m.err != nil {
-			return fmt.Sprintf("Error: %v", m.err)
+			return truncateBlock(fmt.Sprintf("Error: %v", m.err), width)
 		}
 		if len(m.diffs) > 0 {
-			return fmt.Sprintf("All %d files hidden (press 'h' to show)", len(m.diffs))
+			return truncateBlock(fmt.Sprintf("All %d files hidden (press 'h' to show)", len(m.diffs)), width)
 		}
 		// Count actual commits (non-uncommitted)
 		commitCount := 0
@@ -1211,14 +1291,33 @@ func (m Model) renderDiffContent(height int, width int) string {
 			}
 		}
 		if commitCount > 0 {
-			return fmt.Sprintf("%d commit(s) selected, but no file changes\n(press 'c' to view commits)", commitCount)
+			return truncateBlock(fmt.Sprintf("%d commit(s) selected, but no file changes\n(press 'c' to view commits)", commitCount), width)
 		}
-		return "No changes (branch is same as " + m.mainBranch + ")"
+		return truncateBlock("No changes (branch is same as "+m.mainBranch+")", width)
 	}
 
-	var lines []string
+	if width < 1 {
+		width = 1
+	}
 
-	for _, diff := range visible {
+	var b strings.Builder
+	lineIndex := 0
+	writeLine := func(line string) {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+		lineIndex++
+	}
+
+	fileHeaderBase := m.styles.FileHeader
+	fileHeaderStyle := fileHeaderBase.Width(width).MaxWidth(width)
+	headerPadding := fileHeaderBase.GetHorizontalFrameSize()
+	metaStyle := m.styles.HelpDesc.Width(width).MaxWidth(width)
+
+	m.renderedFileOffsets = make([]int, len(visible))
+	for i, diff := range visible {
+		m.renderedFileOffsets[i] = lineIndex
 		// File header
 		statsText := m.styles.StatsAdded.Render(fmt.Sprintf("+%d", diff.Added)) + " " +
 			m.styles.StatsRemoved.Render(fmt.Sprintf("-%d", diff.Removed))
@@ -1226,16 +1325,25 @@ func (m Model) renderDiffContent(height int, width int) string {
 		if diff.OldPath != "" {
 			path = diff.OldPath + " → " + diff.Path
 		}
-		fileHeader := m.styles.FileHeader.Width(width).Render(path + "  " + statsText)
-		lines = append(lines, fileHeader)
+		pathWidth := width - headerPadding - lipgloss.Width(statsText) - 2
+		if pathWidth < 0 {
+			pathWidth = 0
+		}
+		displayPath := ansi.Truncate(path, pathWidth, "...")
+		headerText := displayPath
+		if statsText != "" {
+			headerText = displayPath + "  " + statsText
+		}
+		fileHeader := fileHeaderStyle.Render(headerText)
+		writeLine(fileHeader)
 
 		if diff.Collapsed {
-			lines = append(lines, "  (collapsed)")
+			writeLine(metaStyle.Render("  (collapsed)"))
 			continue
 		}
 
 		if diff.IsBinary {
-			lines = append(lines, "  Binary file")
+			writeLine(metaStyle.Render("  Binary file"))
 			continue
 		}
 
@@ -1243,43 +1351,18 @@ func (m Model) renderDiffContent(height int, width int) string {
 		lineOffset := 0
 		for _, hunk := range diff.Hunks {
 			hunkLines := m.renderHunkWithHighlight(hunk, diff.Path, width, lineOffset)
-			lines = append(lines, hunkLines...)
+			for _, hunkLine := range hunkLines {
+				writeLine(hunkLine)
+			}
 			lineOffset += len(hunk.Lines)
 		}
 	}
 
-	// Apply scroll with proper bounds checking
-	scroll := m.scroll
-	if scroll < 0 {
-		scroll = 0
-	}
-	if len(lines) > 0 && scroll >= len(lines) {
-		scroll = len(lines) - 1
-	}
+	return b.String()
+}
 
-	// Ensure height is positive
-	if height <= 0 {
-		height = 1
-	}
-
-	start := scroll
-	end := start + height
-	if end > len(lines) {
-		end = len(lines)
-	}
-	if start >= len(lines) {
-		start = 0
-		if len(lines) > 0 {
-			start = len(lines) - 1
-		}
-		end = len(lines)
-	}
-	if start >= end {
-		return ""
-	}
-
-	visibleLines := lines[start:end]
-	return lipgloss.JoinVertical(lipgloss.Left, visibleLines...)
+func (m Model) renderDiffContent() string {
+	return m.contentViewport.View()
 }
 
 // renderHunkWithHighlight renders a hunk using cached syntax highlighting
@@ -1287,64 +1370,70 @@ func (m Model) renderHunkWithHighlight(hunk git.Hunk, filename string, width int
 	if m.diffMode == DiffSideBySide {
 		return m.renderHunkSideBySideHighlight(hunk, filename, width, lineOffset)
 	}
-	return m.renderHunkUnifiedHighlight(hunk, filename, lineOffset)
+	return m.renderHunkUnifiedHighlight(hunk, filename, width, lineOffset)
 }
 
 // renderSyntaxLine renders a line with syntax highlighting from cache
 func (m Model) renderSyntaxLine(filename string, lineIdx int, content string) string {
 	cache, ok := m.highlightCache[filename]
 	if !ok || lineIdx < 0 || lineIdx >= len(cache) {
-		return content
+		return strings.ReplaceAll(content, "\t", "    ")
 	}
-
-	var parts []string
-	for _, token := range cache[lineIdx].Tokens {
-		tokenStyle := lipgloss.NewStyle()
-		if token.Style.Color != "" {
-			tokenStyle = tokenStyle.Foreground(lipgloss.Color(token.Style.Color))
-		}
-		if token.Style.Bold {
-			tokenStyle = tokenStyle.Bold(true)
-		}
-		if token.Style.Italic {
-			tokenStyle = tokenStyle.Italic(true)
-		}
-		parts = append(parts, tokenStyle.Render(token.Text))
+	highlighted := cache[lineIdx].Text
+	if highlighted == "" && content != "" {
+		return strings.ReplaceAll(content, "\t", "    ")
 	}
-	if len(parts) > 0 {
-		return strings.Join(parts, "")
-	}
-	return content
+	return highlighted
 }
 
-func (m Model) renderHunkUnifiedHighlight(hunk git.Hunk, filename string, lineOffset int) []string {
+func (m Model) renderHunkUnifiedHighlight(hunk git.Hunk, filename string, width int, lineOffset int) []string {
 	var lines []string
+	if width < 1 {
+		width = 1
+	}
+
+	lineStyle := lipgloss.NewStyle().Width(width).MaxWidth(width)
 
 	// Gutter styles - colored bar on the left
-	gutterAdd := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("│")
-	gutterRemove := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("│")
-	gutterContext := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("│")
+	gutterAdd := m.styles.LineAdded.Render("│")
+	gutterRemove := m.styles.LineRemoved.Render("│")
+	gutterContext := m.styles.LineContext.Render("│")
 
 	for i, line := range hunk.Lines {
 		var gutter string
-		var lineNum string
+		var oldNum string
+		var newNum string
 
 		switch line.Type {
 		case git.LineAdded:
 			gutter = gutterAdd
-			lineNum = fmt.Sprintf("    %4d ", line.NewNum)
+			oldNum = formatLineNumber(0, false)
+			newNum = formatLineNumber(line.NewNum, true)
 		case git.LineRemoved:
 			gutter = gutterRemove
-			lineNum = fmt.Sprintf("%4d     ", line.OldNum)
+			oldNum = formatLineNumber(line.OldNum, true)
+			newNum = formatLineNumber(0, false)
 		default:
 			gutter = gutterContext
-			lineNum = fmt.Sprintf("%4d %4d ", line.OldNum, line.NewNum)
+			oldNum = formatLineNumber(line.OldNum, true)
+			newNum = formatLineNumber(line.NewNum, true)
 		}
 
-		lineNumStyled := m.styles.LineNumber.Render(lineNum)
+		lineNumStyled := m.styles.LineNumber.Render(oldNum + " " + newNum)
 		content := m.renderSyntaxLine(filename, lineOffset+i, line.Content)
+		prefix := lineNumStyled + gutter + " "
+		contentWidth := width - lipgloss.Width(prefix)
+		content = truncateANSI(content, contentWidth)
 
-		lines = append(lines, lineNumStyled+gutter+" "+content)
+		lineText := lineStyle.Render(prefix + content)
+		switch line.Type {
+		case git.LineAdded:
+			lineText = m.styles.AddedBg.Render(lineText)
+		case git.LineRemoved:
+			lineText = m.styles.RemovedBg.Render(lineText)
+		}
+
+		lines = append(lines, lineText)
 	}
 
 	return lines
@@ -1352,14 +1441,37 @@ func (m Model) renderHunkUnifiedHighlight(hunk git.Hunk, filename string, lineOf
 
 func (m Model) renderHunkSideBySideHighlight(hunk git.Hunk, filename string, width int, lineOffset int) []string {
 	var lines []string
+	if width < 1 {
+		width = 1
+	}
 
-	lineNumWidth := 5
-	halfWidth := (width - 3 - lineNumWidth*2) / 2
+	sep := " │ "
+	sepWidth := lipgloss.Width(sep)
+	halfWidth := (width - sepWidth) / 2
+	if halfWidth < 1 {
+		halfWidth = 1
+	}
+	cellStyle := lipgloss.NewStyle().Width(halfWidth).MaxWidth(halfWidth)
 
 	// Gutter styles
-	gutterAdd := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("│")
-	gutterRemove := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("│")
-	gutterContext := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("│")
+	gutterAdd := m.styles.LineAdded.Render("│")
+	gutterRemove := m.styles.LineRemoved.Render("│")
+	gutterContext := m.styles.LineContext.Render("│")
+
+	renderCell := func(numStr string, gutter string, content string, lineType git.LineType) string {
+		prefix := numStr + gutter + " "
+		contentWidth := halfWidth - lipgloss.Width(prefix)
+		content = truncateANSI(content, contentWidth)
+		lineText := cellStyle.Render(prefix + content)
+		switch lineType {
+		case git.LineAdded:
+			return m.styles.AddedBg.Render(lineText)
+		case git.LineRemoved:
+			return m.styles.RemovedBg.Render(lineText)
+		default:
+			return lineText
+		}
+	}
 
 	// Track line indices for syntax highlighting
 	type indexedLine struct {
@@ -1377,97 +1489,108 @@ func (m Model) renderHunkSideBySideHighlight(hunk git.Hunk, filename string, wid
 		case git.LineContext:
 			// Flush pending
 			for len(oldLines) > 0 || len(newLines) > 0 {
-				var leftNumStr, rightNumStr string
-				var leftGutter, rightGutter string
-				var leftContent, rightContent string
+				leftNumStr := m.styles.LineNumber.Render(formatLineNumber(0, false))
+				rightNumStr := m.styles.LineNumber.Render(formatLineNumber(0, false))
+				leftGutter := " "
+				rightGutter := " "
+				leftContent := ""
+				rightContent := ""
+				leftType := git.LineContext
+				rightType := git.LineContext
 
 				if len(oldLines) > 0 {
 					ol := oldLines[0]
-					leftNumStr = fmt.Sprintf("%4d ", ol.line.OldNum)
+					leftNumStr = m.styles.LineNumber.Render(formatLineNumber(ol.line.OldNum, true))
 					leftGutter = gutterRemove
 					leftContent = m.renderSyntaxLine(filename, ol.idx, ol.line.Content)
+					leftType = git.LineRemoved
 					oldLines = oldLines[1:]
-				} else {
-					leftNumStr = "     "
-					leftGutter = " "
 				}
 
 				if len(newLines) > 0 {
 					nl := newLines[0]
-					rightNumStr = fmt.Sprintf("%4d ", nl.line.NewNum)
+					rightNumStr = m.styles.LineNumber.Render(formatLineNumber(nl.line.NewNum, true))
 					rightGutter = gutterAdd
 					rightContent = m.renderSyntaxLine(filename, nl.idx, nl.line.Content)
+					rightType = git.LineAdded
 					newLines = newLines[1:]
-				} else {
-					rightNumStr = "     "
-					rightGutter = " "
 				}
 
-				leftNumStyled := m.styles.LineNumber.Render(leftNumStr)
-				rightNumStyled := m.styles.LineNumber.Render(rightNumStr)
-				left := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(leftContent, halfWidth-2))
-				right := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(rightContent, halfWidth-2))
-				lines = append(lines, leftNumStyled+leftGutter+" "+left+" │ "+rightNumStyled+rightGutter+" "+right)
+				left := renderCell(leftNumStr, leftGutter, leftContent, leftType)
+				right := renderCell(rightNumStr, rightGutter, rightContent, rightType)
+				lines = append(lines, left+sep+right)
 			}
 
 			// Context line on both sides
-			leftNumStr := fmt.Sprintf("%4d ", line.OldNum)
-			rightNumStr := fmt.Sprintf("%4d ", line.NewNum)
+			leftNumStr := m.styles.LineNumber.Render(formatLineNumber(line.OldNum, true))
+			rightNumStr := m.styles.LineNumber.Render(formatLineNumber(line.NewNum, true))
 			content := m.renderSyntaxLine(filename, lineOffset+i, line.Content)
-			leftNumStyled := m.styles.LineNumber.Render(leftNumStr)
-			rightNumStyled := m.styles.LineNumber.Render(rightNumStr)
-			left := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(content, halfWidth-2))
-			right := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(content, halfWidth-2))
-			lines = append(lines, leftNumStyled+gutterContext+" "+left+" │ "+rightNumStyled+gutterContext+" "+right)
+			left := renderCell(leftNumStr, gutterContext, content, git.LineContext)
+			right := renderCell(rightNumStr, gutterContext, content, git.LineContext)
+			lines = append(lines, left+sep+right)
 		}
 	}
 
 	// Flush remaining
 	for len(oldLines) > 0 || len(newLines) > 0 {
-		var leftNumStr, rightNumStr string
-		var leftGutter, rightGutter string
-		var leftContent, rightContent string
+		leftNumStr := m.styles.LineNumber.Render(formatLineNumber(0, false))
+		rightNumStr := m.styles.LineNumber.Render(formatLineNumber(0, false))
+		leftGutter := " "
+		rightGutter := " "
+		leftContent := ""
+		rightContent := ""
+		leftType := git.LineContext
+		rightType := git.LineContext
 
 		if len(oldLines) > 0 {
 			ol := oldLines[0]
-			leftNumStr = fmt.Sprintf("%4d ", ol.line.OldNum)
+			leftNumStr = m.styles.LineNumber.Render(formatLineNumber(ol.line.OldNum, true))
 			leftGutter = gutterRemove
 			leftContent = m.renderSyntaxLine(filename, ol.idx, ol.line.Content)
+			leftType = git.LineRemoved
 			oldLines = oldLines[1:]
-		} else {
-			leftNumStr = "     "
-			leftGutter = " "
 		}
 
 		if len(newLines) > 0 {
 			nl := newLines[0]
-			rightNumStr = fmt.Sprintf("%4d ", nl.line.NewNum)
+			rightNumStr = m.styles.LineNumber.Render(formatLineNumber(nl.line.NewNum, true))
 			rightGutter = gutterAdd
 			rightContent = m.renderSyntaxLine(filename, nl.idx, nl.line.Content)
+			rightType = git.LineAdded
 			newLines = newLines[1:]
-		} else {
-			rightNumStr = "     "
-			rightGutter = " "
 		}
 
-		leftNumStyled := m.styles.LineNumber.Render(leftNumStr)
-		rightNumStyled := m.styles.LineNumber.Render(rightNumStr)
-		left := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(leftContent, halfWidth-2))
-		right := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(rightContent, halfWidth-2))
-		lines = append(lines, leftNumStyled+leftGutter+" "+left+" │ "+rightNumStyled+rightGutter+" "+right)
+		left := renderCell(leftNumStr, leftGutter, leftContent, leftType)
+		right := renderCell(rightNumStr, rightGutter, rightContent, rightType)
+		lines = append(lines, left+sep+right)
 	}
 
 	return lines
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+func formatLineNumber(num int, show bool) string {
+	if !show {
+		return "    "
+	}
+	return fmt.Sprintf("%4d", num)
+}
+
+func truncateANSI(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	return ansi.Truncate(s, maxWidth, "...")
+}
+
+func truncateBlock(s string, width int) string {
+	if width < 1 {
 		return s
 	}
-	if maxLen < 4 {
-		return s[:maxLen]
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = truncateANSI(line, width)
 	}
-	return s[:maxLen-3] + "..."
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderCommitFilter() string {
