@@ -190,6 +190,13 @@ impl App {
             self.context_lines,
         ).unwrap_or_default();
 
+        // Collapse hidden files by default
+        for diff in &mut self.diffs {
+            if is_hidden_file(&diff.path) {
+                diff.collapsed = true;
+            }
+        }
+
         // Rebuild file tree
         self.file_tree = build_file_tree(&self.diffs, &self.expanded_folders);
         self.set_sidebar_cursor(self.file_cursor);
@@ -222,7 +229,9 @@ impl App {
             }
 
             if !lines.is_empty() {
-                let _ = self.highlighter.highlight_lines(&diff.path, &diff.path, &lines);
+                // Use stateless highlighting for diff hunks since they may have gaps
+                // (missing context lines) between them that would break stateful highlighting
+                let _ = self.highlighter.highlight_lines_stateless(&diff.path, &diff.path, &lines);
             }
         }
     }
@@ -254,14 +263,10 @@ impl App {
         }
     }
 
-    /// Update the list of visible diff indices (respecting hidden filter)
+    /// Update the list of visible diff indices
     fn update_visible_diffs(&mut self) {
-        self.visible_diffs = self.diffs
-            .iter()
-            .enumerate()
-            .filter(|(_, d)| self.show_hidden || !is_hidden_file(&d.path))
-            .map(|(i, _)| i)
-            .collect();
+        // All diffs are visible (hidden files are collapsed, not filtered)
+        self.visible_diffs = (0..self.diffs.len()).collect();
     }
 
     /// Get the current branch name
@@ -398,11 +403,7 @@ impl App {
         // Render sidebar
         let tree_nodes = flatten_tree(&self.file_tree);
         let tree_refs: Vec<&TreeNode> = tree_nodes.iter().cloned().collect();
-        let hidden_count = if self.show_hidden {
-            0
-        } else {
-            self.diffs.len() - self.visible_diffs.len()
-        };
+        let hidden_count = self.diffs.iter().filter(|d| is_hidden_file(&d.path)).count();
 
         render_sidebar(
             frame.buffer_mut(),
@@ -437,6 +438,7 @@ impl App {
             frame.buffer_mut(),
             footer_area,
             self.focus,
+            self.diff_mode,
             self.show_hidden,
             self.context_lines,
             &self.styles,
@@ -602,9 +604,9 @@ impl App {
                 let _ = self.reload_diffs();
             }
             (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                // Toggle collapse/expand of hidden files
                 self.show_hidden = !self.show_hidden;
-                self.update_visible_diffs();
-                self.set_content_scroll(self.content_scroll);
+                self.toggle_hidden_files();
             }
             (KeyCode::Char(' '), _) => {
                 if self.focus == FocusArea::Sidebar {
@@ -924,6 +926,19 @@ impl App {
         let all_collapsed = self.diffs.iter().all(|d| d.collapsed);
         for diff in &mut self.diffs {
             diff.collapsed = !all_collapsed;
+        }
+        self.set_content_scroll(self.content_scroll);
+    }
+
+    /// Toggle collapse on hidden files only
+    fn toggle_hidden_files(&mut self) {
+        // Set collapse state based on show_hidden flag
+        // show_hidden = true means hidden files are expanded (not collapsed)
+        // show_hidden = false means hidden files are collapsed
+        for diff in &mut self.diffs {
+            if is_hidden_file(&diff.path) {
+                diff.collapsed = !self.show_hidden;
+            }
         }
         self.set_content_scroll(self.content_scroll);
     }

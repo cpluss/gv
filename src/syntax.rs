@@ -52,7 +52,20 @@ impl Highlighter {
     /// Highlight a set of lines for a given file
     ///
     /// Returns a vector of highlighted lines, where each line is a vector of tokens.
+    /// If `stateful` is true, highlighting state is maintained across lines (for full files).
+    /// If false, each line is highlighted independently (for diff hunks with gaps).
     pub fn highlight_lines(&mut self, cache_key: &str, filename: &str, lines: &[&str]) -> Vec<HighlightedLine> {
+        self.highlight_lines_stateful(cache_key, filename, lines, true)
+    }
+
+    /// Highlight lines without maintaining state across lines
+    ///
+    /// Use this for diff hunks where lines may have gaps between them.
+    pub fn highlight_lines_stateless(&mut self, cache_key: &str, filename: &str, lines: &[&str]) -> Vec<HighlightedLine> {
+        self.highlight_lines_stateful(cache_key, filename, lines, false)
+    }
+
+    fn highlight_lines_stateful(&mut self, cache_key: &str, filename: &str, lines: &[&str], stateful: bool) -> Vec<HighlightedLine> {
         // Check cache first
         if let Some(cached) = self.cache.get(cache_key) {
             if cached.len() == lines.len() {
@@ -60,7 +73,11 @@ impl Highlighter {
             }
         }
 
-        let highlighted = self.do_highlight(filename, lines);
+        let highlighted = if stateful {
+            self.do_highlight(filename, lines)
+        } else {
+            self.do_highlight_stateless(filename, lines)
+        };
 
         // Cache the result
         self.cache.insert(cache_key.to_string(), highlighted.clone());
@@ -68,7 +85,7 @@ impl Highlighter {
         highlighted
     }
 
-    /// Perform the actual highlighting
+    /// Perform the actual highlighting (stateful - maintains state across lines)
     fn do_highlight(&self, filename: &str, lines: &[&str]) -> Vec<HighlightedLine> {
         let syntax = self.detect_syntax(filename, lines.first().copied());
         let theme = &self.theme_set.themes["base16-ocean.dark"];
@@ -77,6 +94,56 @@ impl Highlighter {
         let mut result = Vec::with_capacity(lines.len());
 
         for line in lines {
+            let mut line_with_newline = line.to_string();
+            if !line_with_newline.ends_with('\n') {
+                line_with_newline.push('\n');
+            }
+
+            match highlighter.highlight_line(&line_with_newline, &self.syntax_set) {
+                Ok(ranges) => {
+                    let tokens: Vec<Token> = ranges
+                        .into_iter()
+                        .filter_map(|(style, text)| {
+                            let trimmed = text.trim_end_matches(['\n', '\r']);
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(Token {
+                                    text: trimmed.to_string(),
+                                    style: syntect_style_to_ratatui(style),
+                                })
+                            }
+                        })
+                        .collect();
+                    result.push(tokens);
+                }
+                Err(_) => {
+                    // Fall back to plain text
+                    result.push(vec![Token {
+                        text: line.to_string(),
+                        style: RatatuiStyle::default(),
+                    }]);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Perform highlighting without maintaining state across lines
+    ///
+    /// Each line is highlighted independently, which is more robust for diff hunks
+    /// where lines may have gaps (missing context) between them.
+    fn do_highlight_stateless(&self, filename: &str, lines: &[&str]) -> Vec<HighlightedLine> {
+        let syntax = self.detect_syntax(filename, lines.first().copied());
+        let theme = &self.theme_set.themes["base16-ocean.dark"];
+
+        let mut result = Vec::with_capacity(lines.len());
+
+        for line in lines {
+            // Create a fresh highlighter for each line
+            let mut highlighter = HighlightLines::new(syntax, theme);
+
             let mut line_with_newline = line.to_string();
             if !line_with_newline.ends_with('\n') {
                 line_with_newline.push('\n');

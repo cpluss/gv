@@ -64,16 +64,15 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<Worktree>> {
         let worktree_names = main_repo.worktrees()?;
         for name in worktree_names.iter().flatten() {
             if let Ok(wt) = main_repo.find_worktree(name) {
-                if let Some(wt_path) = wt.path().parent() {
-                    // Open the worktree as a repository to get its HEAD
-                    if let Ok(wt_repo) = Repository::open(wt_path) {
-                        let branch = get_current_branch(&wt_repo);
-                        worktrees.push(Worktree {
-                            path: wt_path.to_path_buf(),
-                            branch,
-                            is_current: false,
-                        });
-                    }
+                let wt_path = wt.path();
+                // Open the worktree as a repository to get its HEAD
+                if let Ok(wt_repo) = Repository::open(wt_path) {
+                    let branch = get_current_branch(&wt_repo);
+                    worktrees.push(Worktree {
+                        path: wt_path.to_path_buf(),
+                        branch,
+                        is_current: false,
+                    });
                 }
             }
         }

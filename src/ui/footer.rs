@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 use super::Styles;
+use super::DiffMode;
 
 /// Focus area indicator
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,8 @@ pub enum FocusArea {
 pub struct Footer<'a> {
     /// Current focus area
     pub focus: FocusArea,
+    /// Current diff view mode
+    pub diff_mode: DiffMode,
     /// Whether hidden files are shown
     pub show_hidden: bool,
     /// Current context lines setting
@@ -46,14 +49,21 @@ impl Widget for Footer<'_> {
         let mut spans = Vec::new();
         spans.push(Span::styled(" ", self.styles.footer));
 
+        // View mode label
+        let view_mode = match self.diff_mode {
+            DiffMode::Unified => "unified",
+            DiffMode::SideBySide => "split",
+            DiffMode::SideBySideFull => "full",
+        };
+
         // Keybinding hints
         let hints = [
             ("j/k", "scroll"),
             ("n/N", "file"),
-            ("u", "view"),
+            ("u", view_mode),
             ("c", "commits"),
             ("w", "worktree"),
-            ("h", if self.show_hidden { "hide" } else { "show" }),
+            ("h", if self.show_hidden { "collapse" } else { "expand" }),
             ("x", &format!("ctx:{}", self.context_lines)),
             ("?", "help"),
             ("q", "quit"),
@@ -92,12 +102,14 @@ pub fn render_footer(
     buf: &mut Buffer,
     area: Rect,
     focus: FocusArea,
+    diff_mode: DiffMode,
     show_hidden: bool,
     context_lines: u32,
     styles: &Styles,
 ) {
     let footer = Footer {
         focus,
+        diff_mode,
         show_hidden,
         context_lines,
         styles,
