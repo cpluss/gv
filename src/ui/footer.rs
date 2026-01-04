@@ -50,7 +50,7 @@ impl Widget for Footer<'_> {
         let hints = [
             ("j/k", "scroll"),
             ("n/N", "file"),
-            ("u", "unified"),
+            ("u", "view"),
             ("c", "commits"),
             ("w", "worktree"),
             ("h", if self.show_hidden { "hide" } else { "show" }),

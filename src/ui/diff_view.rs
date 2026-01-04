@@ -1,6 +1,6 @@
 //! Diff content rendering
 //!
-//! Renders the main diff view in either side-by-side or unified mode.
+//! Renders the main diff view in side-by-side, unified, or full-file side-by-side modes.
 
 use ratatui::{
     buffer::Buffer,
@@ -22,12 +22,14 @@ pub enum DiffMode {
     SideBySide,
     /// Unified view showing all changes in one column
     Unified,
+    /// Full-file side-by-side view with highlighted changes
+    SideBySideFull,
 }
 
 /// Diff content widget
 pub struct DiffContent<'a> {
     /// List of file diffs to display
-    pub diffs: &'a [FileDiff],
+    pub diffs: &'a [&'a FileDiff],
     /// Scroll offset (in lines)
     pub scroll: usize,
     /// Current diff mode
@@ -45,6 +47,7 @@ impl Widget for DiffContent<'_> {
         match self.mode {
             DiffMode::Unified => render_unified(self, area, buf),
             DiffMode::SideBySide => render_side_by_side(self, area, buf),
+            DiffMode::SideBySideFull => render_side_by_side_full(self, area, buf),
         }
     }
 }
@@ -55,7 +58,7 @@ fn render_unified(content: DiffContent<'_>, area: Rect, buf: &mut Buffer) {
     let visible_start = content.scroll;
     let visible_end = content.scroll + area.height as usize;
 
-    for diff in content.diffs.iter() {
+    for diff in content.diffs.iter().copied() {
         let mut line_index = 0;
         // File header
         if current_line >= visible_start && current_line < visible_end {
@@ -113,7 +116,7 @@ fn render_side_by_side(content: DiffContent<'_>, area: Rect, buf: &mut Buffer) {
     let half_width = area.width / 2;
     let line_num_width: u16 = 6;
 
-    for diff in content.diffs.iter() {
+    for diff in content.diffs.iter().copied() {
         let mut line_index = 0;
         // File header (spans both columns)
         if current_line >= visible_start && current_line < visible_end {
@@ -177,6 +180,298 @@ fn render_side_by_side(content: DiffContent<'_>, area: Rect, buf: &mut Buffer) {
             }
 
             line_index += hunk.lines.len();
+        }
+    }
+}
+
+/// Render full-file side-by-side diff view
+fn render_side_by_side_full(content: DiffContent<'_>, area: Rect, buf: &mut Buffer) {
+    let mut current_line: usize = 0;
+    let visible_start = content.scroll;
+    let visible_end = content.scroll + area.height as usize;
+
+    // Calculate column widths
+    let half_width = area.width / 2;
+    let line_num_width: u16 = 6;
+
+    for diff in content.diffs.iter().copied() {
+        // File header (spans both columns)
+        if current_line >= visible_start && current_line < visible_end {
+            let y = area.y + (current_line - visible_start) as u16;
+            render_file_header(buf, area.x, y, area.width, diff, content.styles);
+        }
+        current_line += 1;
+
+        if diff.collapsed || diff.is_binary {
+            continue;
+        }
+
+        let has_full_content = diff.old_content.is_some() || diff.new_content.is_some();
+        let old_lines = diff.old_content.as_ref().map(|lines| lines.as_slice()).unwrap_or(&[]);
+        let new_lines = diff.new_content.as_ref().map(|lines| lines.as_slice()).unwrap_or(&[]);
+        let old_filename = diff.old_path.as_deref().unwrap_or(&diff.path);
+        let new_filename = diff.path.as_str();
+        let old_cache_key = format!("{}::full::old", old_filename);
+        let new_cache_key = format!("{}::full::new", new_filename);
+
+        let mut old_idx = 0usize;
+        let mut new_idx = 0usize;
+
+        for hunk in &diff.hunks {
+            if has_full_content {
+                let old_target = hunk.old_start.saturating_sub(1) as usize;
+                let new_target = hunk.new_start.saturating_sub(1) as usize;
+
+                while old_idx < old_target || new_idx < new_target {
+                    let old_line = old_lines.get(old_idx).map(|s| s.as_str());
+                    let new_line = new_lines.get(new_idx).map(|s| s.as_str());
+
+                    if current_line >= visible_start && current_line < visible_end {
+                        let y = area.y + (current_line - visible_start) as u16;
+                        render_full_column(
+                            buf,
+                            area.x,
+                            y,
+                            half_width,
+                            line_num_width,
+                            old_line.map(|_| old_idx + 1),
+                            old_line,
+                            &old_cache_key,
+                            old_filename,
+                            old_idx,
+                            content.highlighter,
+                            content.styles.gutter_context,
+                            content.styles.line_context,
+                            content.styles,
+                        );
+                        render_full_column(
+                            buf,
+                            area.x + half_width,
+                            y,
+                            half_width,
+                            line_num_width,
+                            new_line.map(|_| new_idx + 1),
+                            new_line,
+                            &new_cache_key,
+                            new_filename,
+                            new_idx,
+                            content.highlighter,
+                            content.styles.gutter_context,
+                            content.styles.line_context,
+                            content.styles,
+                        );
+                    }
+                    current_line += 1;
+
+                    if old_idx < old_target {
+                        old_idx += 1;
+                    }
+                    if new_idx < new_target {
+                        new_idx += 1;
+                    }
+
+                    if current_line >= visible_end {
+                        return;
+                    }
+                }
+            }
+
+            for line in &hunk.lines {
+                if current_line >= visible_start && current_line < visible_end {
+                    let y = area.y + (current_line - visible_start) as u16;
+
+                    match line.line_type {
+                        LineType::Context => {
+                            let old_line = old_lines
+                                .get(old_idx)
+                                .map(|s| s.as_str())
+                                .unwrap_or(line.content.as_str());
+                            let new_line = new_lines
+                                .get(new_idx)
+                                .map(|s| s.as_str())
+                                .unwrap_or(line.content.as_str());
+                            let old_lineno = line.old_lineno.map(|n| n as usize).unwrap_or(old_idx + 1);
+                            let new_lineno = line.new_lineno.map(|n| n as usize).unwrap_or(new_idx + 1);
+
+                            render_full_column(
+                                buf,
+                                area.x,
+                                y,
+                                half_width,
+                                line_num_width,
+                                Some(old_lineno),
+                                Some(old_line),
+                                &old_cache_key,
+                                old_filename,
+                                old_idx,
+                                content.highlighter,
+                                content.styles.gutter_context,
+                                content.styles.line_context,
+                                content.styles,
+                            );
+                            render_full_column(
+                                buf,
+                                area.x + half_width,
+                                y,
+                                half_width,
+                                line_num_width,
+                                Some(new_lineno),
+                                Some(new_line),
+                                &new_cache_key,
+                                new_filename,
+                                new_idx,
+                                content.highlighter,
+                                content.styles.gutter_context,
+                                content.styles.line_context,
+                                content.styles,
+                            );
+                            old_idx += 1;
+                            new_idx += 1;
+                        }
+                        LineType::Removed => {
+                            let old_line = old_lines
+                                .get(old_idx)
+                                .map(|s| s.as_str())
+                                .unwrap_or(line.content.as_str());
+                            let old_lineno = line.old_lineno.map(|n| n as usize).unwrap_or(old_idx + 1);
+                            render_full_column(
+                                buf,
+                                area.x,
+                                y,
+                                half_width,
+                                line_num_width,
+                                Some(old_lineno),
+                                Some(old_line),
+                                &old_cache_key,
+                                old_filename,
+                                old_idx,
+                                content.highlighter,
+                                content.styles.gutter_removed,
+                                content.styles.line_removed,
+                                content.styles,
+                            );
+                            render_full_column(
+                                buf,
+                                area.x + half_width,
+                                y,
+                                half_width,
+                                line_num_width,
+                                None,
+                                None,
+                                &new_cache_key,
+                                new_filename,
+                                new_idx,
+                                content.highlighter,
+                                content.styles.gutter_context,
+                                content.styles.line_context,
+                                content.styles,
+                            );
+                            old_idx += 1;
+                        }
+                        LineType::Added => {
+                            let new_line = new_lines
+                                .get(new_idx)
+                                .map(|s| s.as_str())
+                                .unwrap_or(line.content.as_str());
+                            let new_lineno = line.new_lineno.map(|n| n as usize).unwrap_or(new_idx + 1);
+                            render_full_column(
+                                buf,
+                                area.x,
+                                y,
+                                half_width,
+                                line_num_width,
+                                None,
+                                None,
+                                &old_cache_key,
+                                old_filename,
+                                old_idx,
+                                content.highlighter,
+                                content.styles.gutter_context,
+                                content.styles.line_context,
+                                content.styles,
+                            );
+                            render_full_column(
+                                buf,
+                                area.x + half_width,
+                                y,
+                                half_width,
+                                line_num_width,
+                                Some(new_lineno),
+                                Some(new_line),
+                                &new_cache_key,
+                                new_filename,
+                                new_idx,
+                                content.highlighter,
+                                content.styles.gutter_added,
+                                content.styles.line_added,
+                                content.styles,
+                            );
+                            new_idx += 1;
+                        }
+                        LineType::Header => {}
+                    }
+                }
+
+                current_line += 1;
+                if current_line >= visible_end {
+                    return;
+                }
+            }
+        }
+
+        if has_full_content {
+            while old_idx < old_lines.len() || new_idx < new_lines.len() {
+                let old_line = old_lines.get(old_idx).map(|s| s.as_str());
+                let new_line = new_lines.get(new_idx).map(|s| s.as_str());
+
+                if current_line >= visible_start && current_line < visible_end {
+                    let y = area.y + (current_line - visible_start) as u16;
+                    render_full_column(
+                        buf,
+                        area.x,
+                        y,
+                        half_width,
+                        line_num_width,
+                        old_line.map(|_| old_idx + 1),
+                        old_line,
+                        &old_cache_key,
+                        old_filename,
+                        old_idx,
+                        content.highlighter,
+                        content.styles.gutter_context,
+                        content.styles.line_context,
+                        content.styles,
+                    );
+                    render_full_column(
+                        buf,
+                        area.x + half_width,
+                        y,
+                        half_width,
+                        line_num_width,
+                        new_line.map(|_| new_idx + 1),
+                        new_line,
+                        &new_cache_key,
+                        new_filename,
+                        new_idx,
+                        content.highlighter,
+                        content.styles.gutter_context,
+                        content.styles.line_context,
+                        content.styles,
+                    );
+                }
+
+                current_line += 1;
+                if old_idx < old_lines.len() {
+                    old_idx += 1;
+                }
+                if new_idx < new_lines.len() {
+                    new_idx += 1;
+                }
+
+                if current_line >= visible_end {
+                    return;
+                }
+            }
         }
     }
 }
@@ -348,6 +643,7 @@ fn render_unified_line(
 
     let spans = highlight_spans(
         filename,
+        filename,
         line_index,
         &line.content,
         highlighter,
@@ -414,6 +710,7 @@ fn render_side_column(
 
             let spans = highlight_spans(
                 filename,
+                filename,
                 indexed.index,
                 &l.content,
                 highlighter,
@@ -431,14 +728,71 @@ fn render_side_column(
     }
 }
 
+/// Render one column in full-file mode
+fn render_full_column(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    line_num_width: u16,
+    lineno: Option<usize>,
+    content: Option<&str>,
+    cache_key: &str,
+    filename: &str,
+    line_index: usize,
+    highlighter: &mut Highlighter,
+    gutter_style: Style,
+    line_style: Style,
+    styles: &Styles,
+) {
+    let gutter_width: u16 = 2;
+
+    if let Some(content) = content {
+        let lineno_str = match lineno {
+            Some(n) if n > 0 => format!("{:>5} ", n),
+            _ => "      ".to_string(),
+        };
+        buf.set_line(x, y, &Line::styled(&lineno_str, styles.line_number), line_num_width);
+        buf.set_line(
+            x + line_num_width,
+            y,
+            &Line::styled("│ ", gutter_style),
+            gutter_width,
+        );
+
+        let content_x = x + line_num_width + gutter_width;
+        let content_width = width.saturating_sub(line_num_width + gutter_width);
+
+        for i in content_x..(content_x + content_width) {
+            buf[(i, y)].set_char(' ').set_style(line_style);
+        }
+
+        let spans = highlight_spans(
+            cache_key,
+            filename,
+            line_index,
+            content,
+            highlighter,
+            line_style,
+        );
+        let content_line = Line::from(spans);
+        buf.set_line(content_x, y, &content_line, content_width);
+    } else {
+        for i in x..x + width {
+            buf[(i, y)].set_char(' ').set_style(styles.line_context);
+        }
+    }
+}
+
 fn highlight_spans(
+    cache_key: &str,
     filename: &str,
     line_index: usize,
     content: &str,
     highlighter: &mut Highlighter,
     base_style: Style,
 ) -> Vec<Span<'static>> {
-    let tokens = highlighter.get_line(filename, line_index, content);
+    let tokens = highlighter.get_line(cache_key, filename, line_index, content);
     if tokens.is_empty() {
         let expanded = expand_tabs(content, TAB_WIDTH);
         return vec![Span::styled(expanded, base_style)];
@@ -517,31 +871,53 @@ fn truncate_str(s: &str, max_width: usize) -> String {
 }
 
 /// Calculate total number of lines in the diff view
-pub fn calculate_total_lines(diffs: &[FileDiff]) -> usize {
-    let mut total = 0;
+pub fn calculate_total_lines(diffs: &[&FileDiff], mode: DiffMode) -> usize {
+    diffs.iter().map(|diff| file_line_count(*diff, mode)).sum()
+}
 
-    for diff in diffs {
-        total += 1; // File header
+pub fn file_line_count(diff: &FileDiff, mode: DiffMode) -> usize {
+    let mut total = 1; // File header
 
-        if !diff.collapsed && !diff.is_binary {
+    if diff.collapsed || diff.is_binary {
+        return total;
+    }
+
+    match mode {
+        DiffMode::SideBySide | DiffMode::Unified => {
             for hunk in &diff.hunks {
                 total += 1; // Hunk header
-
-                // Count lines (in side-by-side mode, pairs are rendered on single lines)
                 let pairs = pair_lines(&hunk.lines);
                 total += pairs.len();
             }
+        }
+        DiffMode::SideBySideFull => {
+            total += full_line_count(diff);
         }
     }
 
     total
 }
 
+fn full_line_count(diff: &FileDiff) -> usize {
+    let old_len = diff.old_content.as_ref().map(|lines| lines.len()).unwrap_or(0);
+    let new_len = diff.new_content.as_ref().map(|lines| lines.len()).unwrap_or(0);
+
+    if diff.old_content.is_none() && diff.new_content.is_none() {
+        return diff.hunks.iter().map(|h| pair_lines(&h.lines).len()).sum();
+    }
+
+    if old_len >= new_len {
+        old_len.saturating_add(diff.added)
+    } else {
+        new_len.saturating_add(diff.removed)
+    }
+}
+
 /// Render the diff content
 pub fn render_diff_content(
     buf: &mut Buffer,
     area: Rect,
-    diffs: &[FileDiff],
+    diffs: &[&FileDiff],
     scroll: usize,
     mode: DiffMode,
     highlighter: &mut Highlighter,

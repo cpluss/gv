@@ -26,7 +26,7 @@ use crate::ui::{
     build_file_tree, flatten_tree,
     render_diff_content, render_footer, render_header, render_sidebar,
     render_commit_popup, render_worktree_popup, render_help_popup,
-    diff_view::calculate_total_lines,
+    diff_view::{calculate_total_lines, file_line_count},
     sidebar::SIDEBAR_WIDTH,
 };
 
@@ -160,6 +160,7 @@ impl App {
     fn load_data(&mut self) -> Result<()> {
         self.loading = true;
         self.error = None;
+        self.highlighter.set_base_path(self.repo_path.clone());
 
         // Load worktrees
         self.worktrees = git::list_worktrees(&self.repo_path).unwrap_or_default();
@@ -211,6 +212,10 @@ impl App {
         // Clear highlight cache when diffs change
         self.highlighter.clear_cache();
         self.prime_highlight_cache();
+        if self.diff_mode == DiffMode::SideBySideFull {
+            self.prime_full_highlight_cache();
+        }
+        self.set_content_scroll(self.content_scroll);
 
         Ok(())
     }
@@ -229,7 +234,34 @@ impl App {
             }
 
             if !lines.is_empty() {
-                let _ = self.highlighter.highlight_lines(&diff.path, &lines);
+                let _ = self.highlighter.highlight_lines(&diff.path, &diff.path, &lines);
+            }
+        }
+    }
+
+    fn prime_full_highlight_cache(&mut self) {
+        for diff in &self.diffs {
+            if diff.is_binary {
+                continue;
+            }
+
+            let old_filename = diff.old_path.as_deref().unwrap_or(&diff.path);
+            let new_filename = diff.path.as_str();
+            let old_cache_key = format!("{}::full::old", old_filename);
+            let new_cache_key = format!("{}::full::new", new_filename);
+
+            if let Some(old_lines) = diff.old_content.as_ref() {
+                let line_refs: Vec<&str> = old_lines.iter().map(|line| line.as_str()).collect();
+                if !line_refs.is_empty() {
+                    let _ = self.highlighter.highlight_lines(&old_cache_key, old_filename, &line_refs);
+                }
+            }
+
+            if let Some(new_lines) = diff.new_content.as_ref() {
+                let line_refs: Vec<&str> = new_lines.iter().map(|line| line.as_str()).collect();
+                if !line_refs.is_empty() {
+                    let _ = self.highlighter.highlight_lines(&new_cache_key, new_filename, &line_refs);
+                }
             }
         }
     }
@@ -396,9 +428,9 @@ impl App {
         );
 
         // Get visible diffs
-        let visible: Vec<FileDiff> = self.visible_diffs
+        let visible: Vec<&FileDiff> = self.visible_diffs
             .iter()
-            .filter_map(|&i| self.diffs.get(i).cloned())
+            .filter_map(|&i| self.diffs.get(i))
             .collect();
 
         // Render diff content
@@ -438,7 +470,7 @@ impl App {
 
         let mut line = 0;
         for diff in visible {
-            let file_lines = Self::file_line_count(diff);
+            let file_lines = file_line_count(diff, self.diff_mode);
 
             if line + file_lines > self.content_scroll {
                 return Some(diff.path.clone());
@@ -516,7 +548,7 @@ impl App {
                 if self.focus == FocusArea::Sidebar {
                     self.set_sidebar_cursor(0);
                 } else {
-                    self.content_scroll = 0;
+                    self.set_content_scroll(0);
                 }
             }
             (KeyCode::Char('G'), _) => {
@@ -532,9 +564,9 @@ impl App {
                     }
                 } else if had_prefix {
                     let target = count.saturating_sub(1).min(self.max_scroll());
-                    self.content_scroll = target;
+                    self.set_content_scroll(target);
                 } else {
-                    self.content_scroll = self.max_scroll();
+                    self.set_content_scroll(self.max_scroll());
                 }
             }
             (KeyCode::Char('n'), _) => {
@@ -560,8 +592,13 @@ impl App {
             (KeyCode::Char('u'), KeyModifiers::NONE) => {
                 self.diff_mode = match self.diff_mode {
                     DiffMode::SideBySide => DiffMode::Unified,
-                    DiffMode::Unified => DiffMode::SideBySide,
+                    DiffMode::Unified => DiffMode::SideBySideFull,
+                    DiffMode::SideBySideFull => DiffMode::SideBySide,
                 };
+                if self.diff_mode == DiffMode::SideBySideFull {
+                    self.prime_full_highlight_cache();
+                }
+                self.set_content_scroll(self.content_scroll);
             }
             (KeyCode::Char('x'), _) => {
                 self.context_lines = match self.context_lines {
@@ -574,6 +611,7 @@ impl App {
             (KeyCode::Char('h'), KeyModifiers::NONE) => {
                 self.show_hidden = !self.show_hidden;
                 self.update_visible_diffs();
+                self.set_content_scroll(self.content_scroll);
             }
             (KeyCode::Char(' '), _) => {
                 if self.focus == FocusArea::Sidebar {
@@ -776,7 +814,12 @@ impl App {
             self.content_scroll.saturating_sub((-delta) as usize)
         };
 
+        self.set_content_scroll(new_scroll);
+    }
+
+    fn set_content_scroll(&mut self, new_scroll: usize) {
         self.content_scroll = new_scroll.min(self.max_scroll());
+        self.sync_sidebar_selection();
     }
 
     /// Get maximum scroll position
@@ -786,8 +829,25 @@ impl App {
             .filter_map(|&i| self.diffs.get(i))
             .collect();
 
-        let total_lines = calculate_total_lines(&visible.iter().cloned().cloned().collect::<Vec<_>>());
-        total_lines.saturating_sub(self.height as usize - 2)
+        let total_lines = calculate_total_lines(&visible, self.diff_mode);
+        let viewport_height = self.height.saturating_sub(2) as usize;
+        total_lines.saturating_sub(viewport_height)
+    }
+
+    fn sync_sidebar_selection(&mut self) {
+        let Some(current_file) = self.get_current_file() else {
+            return;
+        };
+
+        let nodes = flatten_tree(&self.file_tree);
+        if nodes.is_empty() {
+            return;
+        }
+
+        if let Some(index) = nodes.iter().position(|node| node.path == current_file) {
+            self.file_cursor = index;
+            self.ensure_sidebar_cursor_visible(nodes.len());
+        }
     }
 
     /// Navigate to next file
@@ -800,10 +860,10 @@ impl App {
 
         let mut line = 0;
         for diff in visible {
-            let file_lines = Self::file_line_count(diff);
+            let file_lines = file_line_count(diff, self.diff_mode);
 
             if line > self.content_scroll {
-                self.content_scroll = line;
+                self.set_content_scroll(line);
                 return;
             }
             line += file_lines;
@@ -822,19 +882,19 @@ impl App {
 
         for diff in visible {
             positions.push(line);
-            let file_lines = Self::file_line_count(diff);
+            let file_lines = file_line_count(diff, self.diff_mode);
             line += file_lines;
         }
 
         // Find the position before current scroll
         for &pos in positions.iter().rev() {
             if pos < self.content_scroll {
-                self.content_scroll = pos;
+                self.set_content_scroll(pos);
                 return;
             }
         }
 
-        self.content_scroll = 0;
+        self.set_content_scroll(0);
     }
 
     /// Toggle collapse on current file
@@ -844,6 +904,7 @@ impl App {
                 diff.collapsed = !diff.collapsed;
             }
         }
+        self.set_content_scroll(self.content_scroll);
     }
 
     /// Toggle collapse on all files
@@ -852,6 +913,7 @@ impl App {
         for diff in &mut self.diffs {
             diff.collapsed = !all_collapsed;
         }
+        self.set_content_scroll(self.content_scroll);
     }
 
     fn sidebar_len(&self) -> usize {
@@ -944,6 +1006,7 @@ impl App {
             if let Some(diff) = self.diffs.get_mut(index) {
                 diff.collapsed = !diff.collapsed;
             }
+            self.content_scroll = self.content_scroll.min(self.max_scroll());
         }
     }
 
@@ -983,6 +1046,7 @@ impl App {
 
         if let Some(index) = node.diff_index {
             self.scroll_to_diff_index(index);
+            self.focus = FocusArea::Content;
         }
     }
 
@@ -1015,6 +1079,7 @@ impl App {
             self.restore_sidebar_cursor(&node_path);
         } else if let Some(diff_index) = node_diff_index {
             self.scroll_to_diff_index(diff_index);
+            self.focus = FocusArea::Content;
         }
     }
 
@@ -1023,21 +1088,14 @@ impl App {
         for &idx in &self.visible_diffs {
             if let Some(diff) = self.diffs.get(idx) {
                 if idx == diff_index {
-                    self.content_scroll = line.min(self.max_scroll());
+                    self.set_content_scroll(line);
                     return;
                 }
-                line += Self::file_line_count(diff);
+                line += file_line_count(diff, self.diff_mode);
             }
         }
     }
 
-    fn file_line_count(diff: &FileDiff) -> usize {
-        if diff.collapsed || diff.is_binary {
-            1
-        } else {
-            1 + diff.hunks.iter().map(|h| 1 + h.lines.len()).sum::<usize>()
-        }
-    }
 }
 
 /// Check if a file matches hidden patterns

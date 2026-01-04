@@ -184,6 +184,8 @@ mod tests {
             FileDiff {
                 path: "src/components/Button.tsx".to_string(),
                 old_path: None,
+                old_content: None,
+                new_content: None,
                 added: 10,
                 removed: 5,
                 hunks: vec![],
@@ -193,6 +195,8 @@ mod tests {
             FileDiff {
                 path: "src/pages/Button.tsx".to_string(),
                 old_path: None,
+                old_content: None,
+                new_content: None,
                 added: 3,
                 removed: 1,
                 hunks: vec![],

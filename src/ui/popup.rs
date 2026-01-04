@@ -202,7 +202,7 @@ pub fn render_help_popup(buf: &mut Buffer, area: Rect, styles: &Styles) {
         ("Tab", "Switch focus"),
         ("", ""),
         ("View", ""),
-        ("u", "Toggle unified/split"),
+        ("u", "Cycle view (split/unified/full)"),
         ("x", "Cycle context lines"),
         ("Space", "Collapse/expand file"),
         ("z", "Collapse/expand all"),

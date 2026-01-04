@@ -5,7 +5,7 @@
 //! of highlighted lines for performance.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use syntect::highlighting::{ThemeSet, Style, FontStyle};
 use syntect::parsing::SyntaxSet;
 use syntect::easy::HighlightLines;
@@ -27,8 +27,10 @@ pub type HighlightedLine = Vec<Token>;
 pub struct Highlighter {
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
-    /// Cache of highlighted lines by filename
+    /// Cache of highlighted lines by cache key
     cache: HashMap<String, Vec<HighlightedLine>>,
+    /// Base path for resolving relative filenames
+    base_path: Option<PathBuf>,
 }
 
 impl Highlighter {
@@ -38,15 +40,21 @@ impl Highlighter {
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             cache: HashMap::new(),
+            base_path: None,
         }
+    }
+
+    /// Set the base path for resolving relative filenames
+    pub fn set_base_path(&mut self, base_path: PathBuf) {
+        self.base_path = Some(base_path);
     }
 
     /// Highlight a set of lines for a given file
     ///
     /// Returns a vector of highlighted lines, where each line is a vector of tokens.
-    pub fn highlight_lines(&mut self, filename: &str, lines: &[&str]) -> Vec<HighlightedLine> {
+    pub fn highlight_lines(&mut self, cache_key: &str, filename: &str, lines: &[&str]) -> Vec<HighlightedLine> {
         // Check cache first
-        if let Some(cached) = self.cache.get(filename) {
+        if let Some(cached) = self.cache.get(cache_key) {
             if cached.len() == lines.len() {
                 return cached.clone();
             }
@@ -55,14 +63,14 @@ impl Highlighter {
         let highlighted = self.do_highlight(filename, lines);
 
         // Cache the result
-        self.cache.insert(filename.to_string(), highlighted.clone());
+        self.cache.insert(cache_key.to_string(), highlighted.clone());
 
         highlighted
     }
 
     /// Perform the actual highlighting
     fn do_highlight(&self, filename: &str, lines: &[&str]) -> Vec<HighlightedLine> {
-        let syntax = self.detect_syntax(filename);
+        let syntax = self.detect_syntax(filename, lines.first().copied());
         let theme = &self.theme_set.themes["base16-ocean.dark"];
 
         let mut highlighter = HighlightLines::new(syntax, theme);
@@ -106,19 +114,37 @@ impl Highlighter {
     }
 
     /// Detect the syntax for a file based on its path
-    fn detect_syntax(&self, filename: &str) -> &syntect::parsing::SyntaxReference {
+    fn detect_syntax(&self, filename: &str, first_line: Option<&str>) -> &syntect::parsing::SyntaxReference {
         let path = Path::new(filename);
+        let lookup_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Some(base) = &self.base_path {
+            base.join(path)
+        } else {
+            path.to_path_buf()
+        };
+
+        if let Ok(Some(syntax)) = self.syntax_set.find_syntax_for_file(&lookup_path) {
+            return syntax;
+        }
+
+        if let Some(line) = first_line {
+            if let Some(syntax) = self.syntax_set.find_syntax_by_first_line(line) {
+                return syntax;
+            }
+        }
 
         // Try by extension first
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if let Some(syntax) = self.syntax_set.find_syntax_by_extension(ext) {
+            let ext = ext.to_lowercase();
+            if let Some(syntax) = self.syntax_set.find_syntax_by_extension(&ext) {
                 return syntax;
             }
         }
 
         // Try by filename
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if let Some(syntax) = self.syntax_set.find_syntax_by_extension(name) {
+            if let Some(syntax) = self.syntax_set.find_syntax_by_token(name) {
                 return syntax;
             }
         }
@@ -133,9 +159,9 @@ impl Highlighter {
     }
 
     /// Get a cached highlighted line, or highlight it on demand
-    pub fn get_line(&mut self, filename: &str, line_index: usize, line_content: &str) -> HighlightedLine {
+    pub fn get_line(&mut self, cache_key: &str, filename: &str, line_index: usize, line_content: &str) -> HighlightedLine {
         // Check if we have this file cached
-        if let Some(cached) = self.cache.get(filename) {
+        if let Some(cached) = self.cache.get(cache_key) {
             if let Some(line) = cached.get(line_index) {
                 return line.clone();
             }
