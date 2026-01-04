@@ -2,7 +2,7 @@
 
 A fast terminal UI for reviewing diffs across git worktrees.
 
-Built for **vibe coding**—when you're running multiple AI agents in parallel and need to review their work.
+Built for **multi-agent vibe coding** when you're running multiple AI agents in parallel and need to review their work.
 
 ![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-2024-orange.svg)
