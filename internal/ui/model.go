@@ -40,9 +40,10 @@ type Config struct {
 
 // dataLoadedMsg is sent when async data loading completes
 type dataLoadedMsg struct {
-	commits []git.Commit
-	diffs   []git.FileDiff
-	err     error
+	commits        []git.Commit
+	diffs          []git.FileDiff
+	highlightCache map[string][]syntax.HighlightedLine
+	err            error
 }
 
 // FocusArea represents which pane has focus
@@ -112,6 +113,9 @@ type Model struct {
 
 	// Folder tree state
 	expandedFolders map[string]bool // Track which folders are expanded
+
+	// Cached syntax highlighting (computed once when diffs load)
+	highlightCache map[string][]syntax.HighlightedLine
 
 	// Components
 	styles      Styles
@@ -224,6 +228,7 @@ func (m Model) Init() tea.Cmd {
 
 // loadDataCmd returns a command that loads commits and diffs asynchronously
 func (m Model) loadDataCmd() tea.Cmd {
+	highlighter := m.highlighter
 	return func() tea.Msg {
 		if len(m.worktrees) == 0 {
 			return dataLoadedMsg{}
@@ -244,9 +249,28 @@ func (m Model) loadDataCmd() tea.Cmd {
 			return dataLoadedMsg{err: err}
 		}
 
+		// Pre-compute syntax highlighting for all files
+		cache := make(map[string][]syntax.HighlightedLine)
+		for _, diff := range diffs {
+			if diff.IsBinary {
+				continue
+			}
+			// Collect all line contents for this file
+			var allLines []string
+			for _, hunk := range diff.Hunks {
+				for _, line := range hunk.Lines {
+					allLines = append(allLines, line.Content)
+				}
+			}
+			if len(allLines) > 0 {
+				cache[diff.Path] = highlighter.HighlightLines(diff.Path, allLines)
+			}
+		}
+
 		return dataLoadedMsg{
-			commits: commits,
-			diffs:   diffs,
+			commits:        commits,
+			diffs:          diffs,
+			highlightCache: cache,
 		}
 	}
 }
@@ -258,6 +282,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.commits = msg.commits
 		m.diffs = msg.diffs
+		m.highlightCache = msg.highlightCache
 		m.err = msg.err
 		return m, nil
 	case spinner.TickMsg:
@@ -1214,9 +1239,12 @@ func (m Model) renderDiffContent(height int, width int) string {
 			continue
 		}
 
-		// Render hunks
+		// Render hunks with cached highlighting
+		lineOffset := 0
 		for _, hunk := range diff.Hunks {
-			lines = append(lines, m.renderHunkWithWidth(hunk, diff.Path, width)...)
+			hunkLines := m.renderHunkWithHighlight(hunk, diff.Path, width, lineOffset)
+			lines = append(lines, hunkLines...)
+			lineOffset += len(hunk.Lines)
 		}
 	}
 
@@ -1254,148 +1282,179 @@ func (m Model) renderDiffContent(height int, width int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, visibleLines...)
 }
 
-func (m Model) renderHunk(hunk git.Hunk, filename string) []string {
-	return m.renderHunkWithWidth(hunk, filename, m.width)
+// renderHunkWithHighlight renders a hunk using cached syntax highlighting
+func (m Model) renderHunkWithHighlight(hunk git.Hunk, filename string, width int, lineOffset int) []string {
+	if m.diffMode == DiffSideBySide {
+		return m.renderHunkSideBySideHighlight(hunk, filename, width, lineOffset)
+	}
+	return m.renderHunkUnifiedHighlight(hunk, filename, lineOffset)
 }
 
-func (m Model) renderHunkWithWidth(hunk git.Hunk, filename string, width int) []string {
-	var lines []string
-
-	if m.diffMode == DiffSideBySide {
-		lines = m.renderHunkSideBySideWithWidth(hunk, filename, width)
-	} else {
-		lines = m.renderHunkUnified(hunk, filename)
+// renderSyntaxLine renders a line with syntax highlighting from cache
+func (m Model) renderSyntaxLine(filename string, lineIdx int, content string) string {
+	cache, ok := m.highlightCache[filename]
+	if !ok || lineIdx < 0 || lineIdx >= len(cache) {
+		return content
 	}
 
-	return lines
+	var parts []string
+	for _, token := range cache[lineIdx].Tokens {
+		tokenStyle := lipgloss.NewStyle()
+		if token.Style.Color != "" {
+			tokenStyle = tokenStyle.Foreground(lipgloss.Color(token.Style.Color))
+		}
+		if token.Style.Bold {
+			tokenStyle = tokenStyle.Bold(true)
+		}
+		if token.Style.Italic {
+			tokenStyle = tokenStyle.Italic(true)
+		}
+		parts = append(parts, tokenStyle.Render(token.Text))
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, "")
+	}
+	return content
 }
 
-func (m Model) renderHunkUnified(hunk git.Hunk, filename string) []string {
+func (m Model) renderHunkUnifiedHighlight(hunk git.Hunk, filename string, lineOffset int) []string {
 	var lines []string
 
-	for _, line := range hunk.Lines {
-		var prefix string
-		var style lipgloss.Style
+	// Gutter styles - colored bar on the left
+	gutterAdd := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("│")
+	gutterRemove := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("│")
+	gutterContext := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("│")
+
+	for i, line := range hunk.Lines {
+		var gutter string
 		var lineNum string
 
 		switch line.Type {
 		case git.LineAdded:
-			prefix = "+"
-			style = m.styles.LineAdded
+			gutter = gutterAdd
 			lineNum = fmt.Sprintf("    %4d ", line.NewNum)
 		case git.LineRemoved:
-			prefix = "-"
-			style = m.styles.LineRemoved
+			gutter = gutterRemove
 			lineNum = fmt.Sprintf("%4d     ", line.OldNum)
 		default:
-			prefix = " "
-			style = m.styles.LineContext
+			gutter = gutterContext
 			lineNum = fmt.Sprintf("%4d %4d ", line.OldNum, line.NewNum)
 		}
 
 		lineNumStyled := m.styles.LineNumber.Render(lineNum)
-		lineText := prefix + line.Content
-		lines = append(lines, lineNumStyled+style.Render(lineText))
+		content := m.renderSyntaxLine(filename, lineOffset+i, line.Content)
+
+		lines = append(lines, lineNumStyled+gutter+" "+content)
 	}
 
 	return lines
 }
 
-func (m Model) renderHunkSideBySideWithWidth(hunk git.Hunk, filename string, width int) []string {
+func (m Model) renderHunkSideBySideHighlight(hunk git.Hunk, filename string, width int, lineOffset int) []string {
 	var lines []string
 
-	lineNumWidth := 5 // "1234 " format
+	lineNumWidth := 5
 	halfWidth := (width - 3 - lineNumWidth*2) / 2
 
-	// Helper to render a side-by-side line
-	renderLine := func(leftNum int, leftContent string, leftStyle lipgloss.Style,
-		rightNum int, rightContent string, rightStyle lipgloss.Style) string {
-		var leftNumStr, rightNumStr string
-		if leftNum > 0 {
-			leftNumStr = fmt.Sprintf("%4d ", leftNum)
-		} else {
-			leftNumStr = "     "
-		}
-		if rightNum > 0 {
-			rightNumStr = fmt.Sprintf("%4d ", rightNum)
-		} else {
-			rightNumStr = "     "
-		}
+	// Gutter styles
+	gutterAdd := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("│")
+	gutterRemove := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("│")
+	gutterContext := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("│")
 
-		leftNumStyled := m.styles.LineNumber.Render(leftNumStr)
-		rightNumStyled := m.styles.LineNumber.Render(rightNumStr)
-
-		left := leftStyle.Width(halfWidth).Render(truncate(leftContent, halfWidth))
-		right := rightStyle.Width(halfWidth).Render(truncate(rightContent, halfWidth))
-		return leftNumStyled + left + " │ " + rightNumStyled + right
+	// Track line indices for syntax highlighting
+	type indexedLine struct {
+		line git.DiffLine
+		idx  int
 	}
+	var oldLines, newLines []indexedLine
 
-	// Split lines into old (left) and new (right)
-	var oldLines, newLines []git.DiffLine
-
-	for _, line := range hunk.Lines {
+	for i, line := range hunk.Lines {
 		switch line.Type {
 		case git.LineRemoved:
-			oldLines = append(oldLines, line)
+			oldLines = append(oldLines, indexedLine{line, lineOffset + i})
 		case git.LineAdded:
-			newLines = append(newLines, line)
+			newLines = append(newLines, indexedLine{line, lineOffset + i})
 		case git.LineContext:
 			// Flush pending
 			for len(oldLines) > 0 || len(newLines) > 0 {
+				var leftNumStr, rightNumStr string
+				var leftGutter, rightGutter string
 				var leftContent, rightContent string
-				var leftStyle, rightStyle lipgloss.Style
-				var leftNum, rightNum int
 
 				if len(oldLines) > 0 {
-					leftContent = oldLines[0].Content
-					leftNum = oldLines[0].OldNum
-					leftStyle = m.styles.LineRemoved
+					ol := oldLines[0]
+					leftNumStr = fmt.Sprintf("%4d ", ol.line.OldNum)
+					leftGutter = gutterRemove
+					leftContent = m.renderSyntaxLine(filename, ol.idx, ol.line.Content)
 					oldLines = oldLines[1:]
 				} else {
-					leftStyle = m.styles.LineContext
+					leftNumStr = "     "
+					leftGutter = " "
 				}
 
 				if len(newLines) > 0 {
-					rightContent = newLines[0].Content
-					rightNum = newLines[0].NewNum
-					rightStyle = m.styles.LineAdded
+					nl := newLines[0]
+					rightNumStr = fmt.Sprintf("%4d ", nl.line.NewNum)
+					rightGutter = gutterAdd
+					rightContent = m.renderSyntaxLine(filename, nl.idx, nl.line.Content)
 					newLines = newLines[1:]
 				} else {
-					rightStyle = m.styles.LineContext
+					rightNumStr = "     "
+					rightGutter = " "
 				}
 
-				lines = append(lines, renderLine(leftNum, leftContent, leftStyle, rightNum, rightContent, rightStyle))
+				leftNumStyled := m.styles.LineNumber.Render(leftNumStr)
+				rightNumStyled := m.styles.LineNumber.Render(rightNumStr)
+				left := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(leftContent, halfWidth-2))
+				right := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(rightContent, halfWidth-2))
+				lines = append(lines, leftNumStyled+leftGutter+" "+left+" │ "+rightNumStyled+rightGutter+" "+right)
 			}
-			lines = append(lines, renderLine(line.OldNum, line.Content, m.styles.LineContext,
-				line.NewNum, line.Content, m.styles.LineContext))
+
+			// Context line on both sides
+			leftNumStr := fmt.Sprintf("%4d ", line.OldNum)
+			rightNumStr := fmt.Sprintf("%4d ", line.NewNum)
+			content := m.renderSyntaxLine(filename, lineOffset+i, line.Content)
+			leftNumStyled := m.styles.LineNumber.Render(leftNumStr)
+			rightNumStyled := m.styles.LineNumber.Render(rightNumStr)
+			left := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(content, halfWidth-2))
+			right := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(content, halfWidth-2))
+			lines = append(lines, leftNumStyled+gutterContext+" "+left+" │ "+rightNumStyled+gutterContext+" "+right)
 		}
 	}
 
 	// Flush remaining
 	for len(oldLines) > 0 || len(newLines) > 0 {
+		var leftNumStr, rightNumStr string
+		var leftGutter, rightGutter string
 		var leftContent, rightContent string
-		var leftStyle, rightStyle lipgloss.Style
-		var leftNum, rightNum int
 
 		if len(oldLines) > 0 {
-			leftContent = oldLines[0].Content
-			leftNum = oldLines[0].OldNum
-			leftStyle = m.styles.LineRemoved
+			ol := oldLines[0]
+			leftNumStr = fmt.Sprintf("%4d ", ol.line.OldNum)
+			leftGutter = gutterRemove
+			leftContent = m.renderSyntaxLine(filename, ol.idx, ol.line.Content)
 			oldLines = oldLines[1:]
 		} else {
-			leftStyle = m.styles.LineContext
+			leftNumStr = "     "
+			leftGutter = " "
 		}
 
 		if len(newLines) > 0 {
-			rightContent = newLines[0].Content
-			rightNum = newLines[0].NewNum
-			rightStyle = m.styles.LineAdded
+			nl := newLines[0]
+			rightNumStr = fmt.Sprintf("%4d ", nl.line.NewNum)
+			rightGutter = gutterAdd
+			rightContent = m.renderSyntaxLine(filename, nl.idx, nl.line.Content)
 			newLines = newLines[1:]
 		} else {
-			rightStyle = m.styles.LineContext
+			rightNumStr = "     "
+			rightGutter = " "
 		}
 
-		lines = append(lines, renderLine(leftNum, leftContent, leftStyle, rightNum, rightContent, rightStyle))
+		leftNumStyled := m.styles.LineNumber.Render(leftNumStr)
+		rightNumStyled := m.styles.LineNumber.Render(rightNumStr)
+		left := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(leftContent, halfWidth-2))
+		right := lipgloss.NewStyle().Width(halfWidth - 2).Render(truncate(rightContent, halfWidth-2))
+		lines = append(lines, leftNumStyled+leftGutter+" "+left+" │ "+rightNumStyled+rightGutter+" "+right)
 	}
 
 	return lines
