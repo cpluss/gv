@@ -17,8 +17,6 @@ pub struct Commit {
     pub full_hash: String,
     /// Commit subject (first line of message)
     pub subject: String,
-    /// Author name
-    pub author: String,
     /// Whether this commit is selected for display
     pub selected: bool,
     /// Virtual entry for uncommitted changes
@@ -41,7 +39,6 @@ pub fn list_commits(repo_path: &Path, base_branch: &str) -> Result<Vec<Commit>> 
             hash: "-------".to_string(),
             full_hash: String::new(),
             subject: "(uncommitted changes)".to_string(),
-            author: String::new(),
             selected: true,
             is_uncommitted: true,
         });
@@ -88,7 +85,6 @@ pub fn list_commits(repo_path: &Path, base_branch: &str) -> Result<Vec<Commit>> 
             hash: hash[..7].to_string(),
             full_hash: hash,
             subject: commit.summary().unwrap_or("").to_string(),
-            author: commit.author().name().unwrap_or("").to_string(),
             selected: true,
             is_uncommitted: false,
         });
@@ -143,7 +139,6 @@ mod tests {
             hash: "abc1234".to_string(),
             full_hash: "abc1234567890".to_string(),
             subject: "Test commit".to_string(),
-            author: "Test Author".to_string(),
             selected: true,
             is_uncommitted: false,
         };

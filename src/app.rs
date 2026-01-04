@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -56,6 +56,8 @@ const HIDDEN_PATTERNS: &[&str] = &[
     "poetry.lock",
     "composer.lock",
 ];
+
+const MOUSE_SCROLL_LINES: i32 = 5;
 
 /// Main application state
 pub struct App {
@@ -201,14 +203,35 @@ impl App {
 
         // Rebuild file tree
         self.file_tree = build_file_tree(&self.diffs, &self.expanded_folders);
+        self.set_sidebar_cursor(self.file_cursor);
 
         // Update visible diffs
         self.update_visible_diffs();
 
         // Clear highlight cache when diffs change
         self.highlighter.clear_cache();
+        self.prime_highlight_cache();
 
         Ok(())
+    }
+
+    fn prime_highlight_cache(&mut self) {
+        for diff in &self.diffs {
+            if diff.is_binary {
+                continue;
+            }
+
+            let mut lines = Vec::new();
+            for hunk in &diff.hunks {
+                for line in &hunk.lines {
+                    lines.push(line.content.as_str());
+                }
+            }
+
+            if !lines.is_empty() {
+                let _ = self.highlighter.highlight_lines(&diff.path, &lines);
+            }
+        }
     }
 
     /// Update the list of visible diff indices (respecting hidden filter)
@@ -386,7 +409,6 @@ impl App {
             self.content_scroll,
             self.diff_mode,
             &mut self.highlighter,
-            self.focus == FocusArea::Content,
             &self.styles,
         );
 
@@ -416,11 +438,7 @@ impl App {
 
         let mut line = 0;
         for diff in visible {
-            let file_lines = if diff.collapsed || diff.is_binary {
-                1
-            } else {
-                1 + diff.hunks.iter().map(|h| 1 + h.lines.len()).sum::<usize>()
-            };
+            let file_lines = Self::file_line_count(diff);
 
             if line + file_lines > self.content_scroll {
                 return Some(diff.path.clone());
@@ -453,7 +471,10 @@ impl App {
             }
         }
 
-        let count = self.number_prefix.take().unwrap_or(1);
+        let (count, had_prefix) = match self.number_prefix.take() {
+            Some(value) => (value, true),
+            None => (1, false),
+        };
 
         match (key.code, key.modifiers) {
             // Quit
@@ -462,28 +483,57 @@ impl App {
 
             // Navigation
             (KeyCode::Char('j') | KeyCode::Down, _) => {
-                self.scroll_content(count as i32);
+                if self.focus == FocusArea::Sidebar {
+                    self.move_sidebar_cursor(count as i32);
+                } else {
+                    self.scroll_content(count as i32);
+                }
             }
             (KeyCode::Char('k') | KeyCode::Up, _) => {
-                self.scroll_content(-(count as i32));
+                if self.focus == FocusArea::Sidebar {
+                    self.move_sidebar_cursor(-(count as i32));
+                } else {
+                    self.scroll_content(-(count as i32));
+                }
             }
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                 let page = (self.height / 2) as i32;
-                self.scroll_content(page * count as i32);
+                if self.focus == FocusArea::Sidebar {
+                    self.scroll_sidebar(page * count as i32);
+                } else {
+                    self.scroll_content(page * count as i32);
+                }
             }
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                 let page = (self.height / 2) as i32;
-                self.scroll_content(-page * count as i32);
+                if self.focus == FocusArea::Sidebar {
+                    self.scroll_sidebar(-page * count as i32);
+                } else {
+                    self.scroll_content(-page * count as i32);
+                }
             }
             (KeyCode::Char('g'), _) => {
-                self.content_scroll = 0;
+                if self.focus == FocusArea::Sidebar {
+                    self.set_sidebar_cursor(0);
+                } else {
+                    self.content_scroll = 0;
+                }
             }
             (KeyCode::Char('G'), _) => {
-                if count > 1 {
-                    // Go to specific line
-                    self.content_scroll = count.saturating_sub(1);
+                if self.focus == FocusArea::Sidebar {
+                    let total = self.sidebar_len();
+                    if total > 0 {
+                        let target = if had_prefix {
+                            count.saturating_sub(1)
+                        } else {
+                            total.saturating_sub(1)
+                        };
+                        self.set_sidebar_cursor(target.min(total.saturating_sub(1)));
+                    }
+                } else if had_prefix {
+                    let target = count.saturating_sub(1).min(self.max_scroll());
+                    self.content_scroll = target;
                 } else {
-                    // Go to bottom
                     self.content_scroll = self.max_scroll();
                 }
             }
@@ -515,9 +565,9 @@ impl App {
             }
             (KeyCode::Char('x'), _) => {
                 self.context_lines = match self.context_lines {
-                    0 => 1,
-                    1 => 3,
-                    _ => 0,
+                    3 => 1,
+                    1 => 0,
+                    _ => 3,
                 };
                 let _ = self.reload_diffs();
             }
@@ -526,7 +576,16 @@ impl App {
                 self.update_visible_diffs();
             }
             (KeyCode::Char(' '), _) => {
-                self.toggle_current_file();
+                if self.focus == FocusArea::Sidebar {
+                    self.toggle_sidebar_node();
+                } else {
+                    self.toggle_current_file();
+                }
+            }
+            (KeyCode::Enter, _) => {
+                if self.focus == FocusArea::Sidebar {
+                    self.jump_to_sidebar_selection();
+                }
             }
             (KeyCode::Char('z'), _) => {
                 self.toggle_all_files();
@@ -683,16 +742,24 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                self.scroll_content(3);
+                if mouse.column < SIDEBAR_WIDTH {
+                    self.scroll_sidebar(MOUSE_SCROLL_LINES);
+                } else {
+                    self.scroll_content(MOUSE_SCROLL_LINES);
+                }
             }
             MouseEventKind::ScrollUp => {
-                self.scroll_content(-3);
+                if mouse.column < SIDEBAR_WIDTH {
+                    self.scroll_sidebar(-MOUSE_SCROLL_LINES);
+                } else {
+                    self.scroll_content(-MOUSE_SCROLL_LINES);
+                }
             }
-            MouseEventKind::Down(_) => {
+            MouseEventKind::Down(MouseButton::Left) => {
                 // Check if click is in sidebar
                 if mouse.column < SIDEBAR_WIDTH {
                     self.focus = FocusArea::Sidebar;
-                    // TODO: Handle file selection on click
+                    self.handle_sidebar_click(mouse.row);
                 } else {
                     self.focus = FocusArea::Content;
                 }
@@ -733,11 +800,7 @@ impl App {
 
         let mut line = 0;
         for diff in visible {
-            let file_lines = if diff.collapsed || diff.is_binary {
-                1
-            } else {
-                1 + diff.hunks.iter().map(|h| 1 + h.lines.len()).sum::<usize>()
-            };
+            let file_lines = Self::file_line_count(diff);
 
             if line > self.content_scroll {
                 self.content_scroll = line;
@@ -759,11 +822,7 @@ impl App {
 
         for diff in visible {
             positions.push(line);
-            let file_lines = if diff.collapsed || diff.is_binary {
-                1
-            } else {
-                1 + diff.hunks.iter().map(|h| 1 + h.lines.len()).sum::<usize>()
-            };
+            let file_lines = Self::file_line_count(diff);
             line += file_lines;
         }
 
@@ -794,10 +853,201 @@ impl App {
             diff.collapsed = !all_collapsed;
         }
     }
+
+    fn sidebar_len(&self) -> usize {
+        flatten_tree(&self.file_tree).len()
+    }
+
+    fn sidebar_visible_height(&self) -> usize {
+        let content_height = self.height.saturating_sub(2);
+        content_height.saturating_sub(2) as usize
+    }
+
+    fn set_sidebar_cursor(&mut self, index: usize) {
+        let total = self.sidebar_len();
+        if total == 0 {
+            self.file_cursor = 0;
+            self.sidebar_scroll = 0;
+            return;
+        }
+
+        self.file_cursor = index.min(total.saturating_sub(1));
+        self.ensure_sidebar_cursor_visible(total);
+    }
+
+    fn move_sidebar_cursor(&mut self, delta: i32) {
+        let total = self.sidebar_len();
+        if total == 0 {
+            self.file_cursor = 0;
+            self.sidebar_scroll = 0;
+            return;
+        }
+
+        let new_cursor = if delta >= 0 {
+            self.file_cursor.saturating_add(delta as usize)
+        } else {
+            self.file_cursor.saturating_sub((-delta) as usize)
+        };
+
+        self.file_cursor = new_cursor.min(total.saturating_sub(1));
+        self.ensure_sidebar_cursor_visible(total);
+    }
+
+    fn scroll_sidebar(&mut self, delta: i32) {
+        let total = self.sidebar_len();
+        let visible = self.sidebar_visible_height();
+        if total <= visible || visible == 0 {
+            self.sidebar_scroll = 0;
+            return;
+        }
+
+        let max_scroll = total.saturating_sub(visible);
+        let new_scroll = if delta >= 0 {
+            self.sidebar_scroll.saturating_add(delta as usize)
+        } else {
+            self.sidebar_scroll.saturating_sub((-delta) as usize)
+        };
+
+        self.sidebar_scroll = new_scroll.min(max_scroll);
+    }
+
+    fn ensure_sidebar_cursor_visible(&mut self, total: usize) {
+        let visible = self.sidebar_visible_height();
+        if visible == 0 {
+            return;
+        }
+
+        if self.file_cursor < self.sidebar_scroll {
+            self.sidebar_scroll = self.file_cursor;
+        } else if self.file_cursor >= self.sidebar_scroll + visible {
+            self.sidebar_scroll = self.file_cursor + 1 - visible;
+        }
+
+        let max_scroll = total.saturating_sub(visible);
+        self.sidebar_scroll = self.sidebar_scroll.min(max_scroll);
+    }
+
+    fn toggle_sidebar_node(&mut self) {
+        let nodes = flatten_tree(&self.file_tree);
+        let Some(node) = nodes.get(self.file_cursor) else {
+            return;
+        };
+
+        if node.is_folder {
+            let expanded = self.expanded_folders.entry(node.path.clone()).or_insert(true);
+            *expanded = !*expanded;
+
+            let path = node.path.clone();
+            self.file_tree = build_file_tree(&self.diffs, &self.expanded_folders);
+            self.restore_sidebar_cursor(&path);
+        } else if let Some(index) = node.diff_index {
+            if let Some(diff) = self.diffs.get_mut(index) {
+                diff.collapsed = !diff.collapsed;
+            }
+        }
+    }
+
+    fn restore_sidebar_cursor(&mut self, path: &str) {
+        let nodes = flatten_tree(&self.file_tree);
+        if nodes.is_empty() {
+            self.file_cursor = 0;
+            self.sidebar_scroll = 0;
+            return;
+        }
+
+        if let Some(index) = nodes.iter().position(|node| node.path == path) {
+            self.file_cursor = index;
+        } else {
+            self.file_cursor = self.file_cursor.min(nodes.len().saturating_sub(1));
+        }
+
+        self.ensure_sidebar_cursor_visible(nodes.len());
+    }
+
+    fn jump_to_sidebar_selection(&mut self) {
+        let nodes = flatten_tree(&self.file_tree);
+        let Some(node) = nodes.get(self.file_cursor) else {
+            return;
+        };
+
+        if node.is_folder {
+            let expanded = self.expanded_folders.entry(node.path.clone()).or_insert(true);
+            if !*expanded {
+                *expanded = true;
+                let path = node.path.clone();
+                self.file_tree = build_file_tree(&self.diffs, &self.expanded_folders);
+                self.restore_sidebar_cursor(&path);
+            }
+            return;
+        }
+
+        if let Some(index) = node.diff_index {
+            self.scroll_to_diff_index(index);
+        }
+    }
+
+    fn handle_sidebar_click(&mut self, row: u16) {
+        let content_top = 1u16;
+        let sidebar_top = content_top;
+        let inner_top = sidebar_top.saturating_add(1);
+        let inner_height = self.height.saturating_sub(2).saturating_sub(2);
+
+        if row < inner_top || row >= inner_top.saturating_add(inner_height) {
+            return;
+        }
+
+        let index = self.sidebar_scroll + (row - inner_top) as usize;
+        let nodes = flatten_tree(&self.file_tree);
+        if index >= nodes.len() {
+            return;
+        }
+
+        let node = nodes[index];
+        let node_path = node.path.clone();
+        let node_is_folder = node.is_folder;
+        let node_diff_index = node.diff_index;
+
+        self.set_sidebar_cursor(index);
+        if node_is_folder {
+            let expanded = self.expanded_folders.entry(node_path.clone()).or_insert(true);
+            *expanded = !*expanded;
+            self.file_tree = build_file_tree(&self.diffs, &self.expanded_folders);
+            self.restore_sidebar_cursor(&node_path);
+        } else if let Some(diff_index) = node_diff_index {
+            self.scroll_to_diff_index(diff_index);
+        }
+    }
+
+    fn scroll_to_diff_index(&mut self, diff_index: usize) {
+        let mut line = 0;
+        for &idx in &self.visible_diffs {
+            if let Some(diff) = self.diffs.get(idx) {
+                if idx == diff_index {
+                    self.content_scroll = line.min(self.max_scroll());
+                    return;
+                }
+                line += Self::file_line_count(diff);
+            }
+        }
+    }
+
+    fn file_line_count(diff: &FileDiff) -> usize {
+        if diff.collapsed || diff.is_binary {
+            1
+        } else {
+            1 + diff.hunks.iter().map(|h| 1 + h.lines.len()).sum::<usize>()
+        }
+    }
 }
 
 /// Check if a file matches hidden patterns
 fn is_hidden_file(path: &str) -> bool {
+    // Check for dotfiles/dotfolders (any path component starting with ".")
+    if path.split('/').any(|part| part.starts_with('.')) {
+        return true;
+    }
+
+    // Check against specific hidden patterns
     let filename = path.split('/').last().unwrap_or(path);
     HIDDEN_PATTERNS.iter().any(|p| filename == *p)
 }

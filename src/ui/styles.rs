@@ -10,14 +10,11 @@ pub mod colors {
     use ratatui::style::Color;
 
     // Base colors
-    pub const BG: Color = Color::Reset;
     pub const FG: Color = Color::White;
     pub const DIM: Color = Color::DarkGray;
 
     // Diff colors (delta-like palette)
-    pub const ADDED_BG: Color = Color::Rgb(35, 60, 35);
     pub const ADDED_FG: Color = Color::Rgb(120, 200, 120);
-    pub const REMOVED_BG: Color = Color::Rgb(60, 35, 35);
     pub const REMOVED_FG: Color = Color::Rgb(200, 120, 120);
 
     // Gutter colors
@@ -27,7 +24,6 @@ pub mod colors {
 
     // Line numbers
     pub const LINE_NUMBER: Color = Color::DarkGray;
-    pub const LINE_NUMBER_HIGHLIGHT: Color = Color::Yellow;
 
     // UI elements
     pub const HEADER_BG: Color = Color::Rgb(40, 44, 52);
@@ -40,7 +36,6 @@ pub mod colors {
     pub const STATS_REMOVED: Color = Color::Red;
 
     // Selection
-    pub const SELECTED_BG: Color = Color::Rgb(60, 60, 80);
     pub const CURSOR_BG: Color = Color::Rgb(80, 80, 100);
 
     // File headers
@@ -74,7 +69,6 @@ pub struct Styles {
 
     // Diff content
     pub line_number: Style,
-    pub line_number_highlight: Style,
     pub line_added: Style,
     pub line_removed: Style,
     pub line_context: Style,
@@ -92,7 +86,6 @@ pub struct Styles {
 
     // Sidebar
     pub sidebar_normal: Style,
-    pub sidebar_selected: Style,
     pub sidebar_cursor: Style,
     pub folder_icon: Style,
 
@@ -103,7 +96,6 @@ pub struct Styles {
     // Popup
     pub popup: Style,
     pub popup_title: Style,
-    pub popup_selected: Style,
 
     // Worktree
     pub worktree_current: Style,
@@ -138,15 +130,8 @@ impl Styles {
 
             // Diff content
             line_number: Style::default().fg(colors::LINE_NUMBER),
-            line_number_highlight: Style::default()
-                .fg(colors::LINE_NUMBER_HIGHLIGHT)
-                .add_modifier(Modifier::BOLD),
-            line_added: Style::default()
-                .bg(colors::ADDED_BG)
-                .fg(colors::ADDED_FG),
-            line_removed: Style::default()
-                .bg(colors::REMOVED_BG)
-                .fg(colors::REMOVED_FG),
+            line_added: Style::default().fg(colors::ADDED_FG),
+            line_removed: Style::default().fg(colors::REMOVED_FG),
             line_context: Style::default().fg(colors::FG),
             gutter_added: Style::default().fg(colors::GUTTER_ADDED),
             gutter_removed: Style::default().fg(colors::GUTTER_REMOVED),
@@ -171,9 +156,6 @@ impl Styles {
 
             // Sidebar
             sidebar_normal: Style::default().fg(colors::FG),
-            sidebar_selected: Style::default()
-                .bg(colors::SELECTED_BG)
-                .fg(colors::FG),
             sidebar_cursor: Style::default()
                 .bg(colors::CURSOR_BG)
                 .fg(colors::FG)
@@ -189,9 +171,6 @@ impl Styles {
             popup_title: Style::default()
                 .fg(colors::POPUP_BORDER)
                 .add_modifier(Modifier::BOLD),
-            popup_selected: Style::default()
-                .bg(colors::SELECTED_BG)
-                .fg(colors::FG),
 
             // Worktree
             worktree_current: Style::default()

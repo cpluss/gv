@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use anyhow::{Context, Result};
-use git2::{Diff, DiffOptions, Repository, DiffFormat, DiffDelta, DiffHunk, DiffLine as Git2DiffLine};
+use git2::{Diff, DiffOptions, Repository, DiffFormat};
 
 /// Type of a diff line
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +120,7 @@ fn parse_diff(diff: &Diff) -> Result<Vec<FileDiff>> {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut current_file: Option<FileDiff> = None;
     let mut current_hunk: Option<Hunk> = None;
+    let mut last_hunk_header: Option<String> = None;
 
     diff.print(DiffFormat::Patch, |delta, hunk, line| {
         // Handle file changes
@@ -140,6 +141,7 @@ fn parse_diff(diff: &Diff) -> Result<Vec<FileDiff>> {
                 if let Some(f) = current_file.take() {
                     files.push(f);
                 }
+                last_hunk_header = None; // Reset for new file
 
                 // Start new file
                 let old_path = delta.old_file().path()
@@ -158,25 +160,33 @@ fn parse_diff(diff: &Diff) -> Result<Vec<FileDiff>> {
             }
         }
 
-        // Handle hunks
+        // Handle hunks - only create new hunk when header changes
         if let Some(h) = hunk {
-            // Save previous hunk
-            if let Some(prev_hunk) = current_hunk.take() {
-                if let Some(ref mut f) = current_file {
-                    f.hunks.push(prev_hunk);
-                }
-            }
-
-            // Start new hunk
             let header = String::from_utf8_lossy(h.header()).to_string();
-            current_hunk = Some(Hunk {
-                old_start: h.old_start(),
-                old_count: h.old_lines(),
-                new_start: h.new_start(),
-                new_count: h.new_lines(),
-                header: header.trim().to_string(),
-                lines: Vec::new(),
-            });
+            let header_trimmed = header.trim().to_string();
+
+            // Check if this is a new hunk (different header)
+            let is_new_hunk = last_hunk_header.as_ref() != Some(&header_trimmed);
+
+            if is_new_hunk {
+                // Save previous hunk
+                if let Some(prev_hunk) = current_hunk.take() {
+                    if let Some(ref mut f) = current_file {
+                        f.hunks.push(prev_hunk);
+                    }
+                }
+
+                // Start new hunk
+                current_hunk = Some(Hunk {
+                    old_start: h.old_start(),
+                    old_count: h.old_lines(),
+                    new_start: h.new_start(),
+                    new_count: h.new_lines(),
+                    header: header_trimmed.clone(),
+                    lines: Vec::new(),
+                });
+                last_hunk_header = Some(header_trimmed);
+            }
         }
 
         // Handle lines
@@ -191,7 +201,7 @@ fn parse_diff(diff: &Diff) -> Result<Vec<FileDiff>> {
         let content = String::from_utf8_lossy(line.content()).to_string();
         let diff_line = DiffLine {
             line_type,
-            content: content.trim_end_matches('\n').to_string(),
+            content: content.trim_end_matches(['\n', '\r']).to_string(),
             old_lineno: line.old_lineno(),
             new_lineno: line.new_lineno(),
         };

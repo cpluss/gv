@@ -43,7 +43,7 @@ pub fn build_file_tree(diffs: &[FileDiff], expanded_folders: &HashMap<String, bo
 
         // Add folder entries
         let mut current_path = String::new();
-        for (depth, part) in parts.iter().take(parts.len() - 1).enumerate() {
+        for (_depth, part) in parts.iter().take(parts.len() - 1).enumerate() {
             if !current_path.is_empty() {
                 current_path.push('/');
             }
@@ -122,6 +122,7 @@ pub fn flatten_tree(nodes: &[TreeNode]) -> Vec<&TreeNode> {
 }
 
 /// Get display names for files, disambiguating duplicates
+#[allow(dead_code)]
 pub fn get_display_names(diffs: &[FileDiff]) -> HashMap<String, String> {
     let mut names: HashMap<String, String> = HashMap::new();
     let mut basename_counts: HashMap<String, Vec<String>> = HashMap::new();
@@ -154,6 +155,7 @@ pub fn get_display_names(diffs: &[FileDiff]) -> HashMap<String, String> {
 }
 
 /// Find the shortest unique suffix for a path among a set of paths
+#[allow(dead_code)]
 fn find_unique_suffix(path: &str, all_paths: &[String]) -> String {
     let parts: Vec<&str> = path.split('/').collect();
 

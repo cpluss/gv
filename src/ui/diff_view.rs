@@ -5,13 +5,14 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Style,
     text::{Line, Span},
     widgets::Widget,
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::git::{FileDiff, Hunk, LineType};
-use crate::syntax::{Highlighter, HighlightedLine, Token};
+use crate::syntax::{Highlighter, Token};
 use super::Styles;
 
 /// Diff display mode
@@ -35,9 +36,9 @@ pub struct DiffContent<'a> {
     pub highlighter: &'a mut Highlighter,
     /// Styles
     pub styles: &'a Styles,
-    /// Whether the content pane is focused
-    pub focused: bool,
 }
+
+const TAB_WIDTH: usize = 4;
 
 impl Widget for DiffContent<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -55,6 +56,7 @@ fn render_unified(content: DiffContent<'_>, area: Rect, buf: &mut Buffer) {
     let visible_end = content.scroll + area.height as usize;
 
     for diff in content.diffs.iter() {
+        let mut line_index = 0;
         // File header
         if current_line >= visible_start && current_line < visible_end {
             let y = area.y + (current_line - visible_start) as u16;
@@ -85,11 +87,13 @@ fn render_unified(content: DiffContent<'_>, area: Rect, buf: &mut Buffer) {
                         area.width,
                         line,
                         &diff.path,
+                        line_index,
                         content.highlighter,
                         content.styles,
                     );
                 }
                 current_line += 1;
+                line_index += 1;
 
                 if current_line >= visible_end {
                     return;
@@ -110,6 +114,7 @@ fn render_side_by_side(content: DiffContent<'_>, area: Rect, buf: &mut Buffer) {
     let line_num_width: u16 = 6;
 
     for diff in content.diffs.iter() {
+        let mut line_index = 0;
         // File header (spans both columns)
         if current_line >= visible_start && current_line < visible_end {
             let y = area.y + (current_line - visible_start) as u16;
@@ -130,7 +135,7 @@ fn render_side_by_side(content: DiffContent<'_>, area: Rect, buf: &mut Buffer) {
             current_line += 1;
 
             // Process lines into pairs for side-by-side display
-            let pairs = pair_lines(&hunk.lines);
+            let pairs = pair_lines_with_index(&hunk.lines, line_index);
 
             for (old_line, new_line) in pairs {
                 if current_line >= visible_start && current_line < visible_end {
@@ -170,6 +175,8 @@ fn render_side_by_side(content: DiffContent<'_>, area: Rect, buf: &mut Buffer) {
                     return;
                 }
             }
+
+            line_index += hunk.lines.len();
         }
     }
 }
@@ -177,33 +184,56 @@ fn render_side_by_side(content: DiffContent<'_>, area: Rect, buf: &mut Buffer) {
 /// Pair old and new lines for side-by-side display
 fn pair_lines(lines: &[crate::git::DiffLine]) -> Vec<(Option<&crate::git::DiffLine>, Option<&crate::git::DiffLine>)> {
     let mut pairs = Vec::new();
-    let mut old_lines: Vec<&crate::git::DiffLine> = Vec::new();
-    let mut new_lines: Vec<&crate::git::DiffLine> = Vec::new();
 
     for line in lines {
         match line.line_type {
-            LineType::Removed => old_lines.push(line),
-            LineType::Added => new_lines.push(line),
+            LineType::Removed => {
+                // Removed lines appear on left only
+                pairs.push((Some(line), None));
+            }
+            LineType::Added => {
+                // Added lines appear on right only
+                pairs.push((None, Some(line)));
+            }
             LineType::Context => {
-                // Flush any pending removed/added pairs
-                let max_len = old_lines.len().max(new_lines.len());
-                for i in 0..max_len {
-                    pairs.push((old_lines.get(i).copied(), new_lines.get(i).copied()));
-                }
-                old_lines.clear();
-                new_lines.clear();
-
-                // Add context line to both sides
+                // Context lines appear on both sides
                 pairs.push((Some(line), Some(line)));
             }
             LineType::Header => {}
         }
     }
 
-    // Flush remaining
-    let max_len = old_lines.len().max(new_lines.len());
-    for i in 0..max_len {
-        pairs.push((old_lines.get(i).copied(), new_lines.get(i).copied()));
+    pairs
+}
+
+#[derive(Clone, Copy)]
+struct IndexedLine<'a> {
+    line: &'a crate::git::DiffLine,
+    index: usize,
+}
+
+/// Pair old and new lines for side-by-side display, preserving line indices
+fn pair_lines_with_index(lines: &[crate::git::DiffLine], start_index: usize) -> Vec<(Option<IndexedLine<'_>>, Option<IndexedLine<'_>>)> {
+    let mut pairs = Vec::new();
+
+    for (offset, line) in lines.iter().enumerate() {
+        let indexed = IndexedLine {
+            line,
+            index: start_index + offset,
+        };
+
+        match line.line_type {
+            LineType::Removed => {
+                pairs.push((Some(indexed), None));
+            }
+            LineType::Added => {
+                pairs.push((None, Some(indexed)));
+            }
+            LineType::Context => {
+                pairs.push((Some(indexed), Some(indexed)));
+            }
+            LineType::Header => {}
+        }
     }
 
     pairs
@@ -219,10 +249,16 @@ fn render_file_header(buf: &mut Buffer, x: u16, y: u16, width: u16, diff: &FileD
     let stats = format!(" +{} -{} ", diff.added, diff.removed);
     let path_width = (width as usize).saturating_sub(stats.len() + 2);
 
-    let path = if diff.path.len() > path_width && path_width > 3 {
-        format!("...{}", &diff.path[diff.path.len() - path_width + 3..])
+    let display_path = if let Some(old_path) = &diff.old_path {
+        format!("{} → {}", old_path, diff.path)
     } else {
         diff.path.clone()
+    };
+
+    let path = if display_path.len() > path_width && path_width > 3 {
+        format!("...{}", &display_path[display_path.len() - path_width + 3..])
+    } else {
+        display_path
     };
 
     let mut spans = vec![
@@ -246,10 +282,14 @@ fn render_file_header(buf: &mut Buffer, x: u16, y: u16, width: u16, diff: &FileD
 
 /// Render a hunk header
 fn render_hunk_header(buf: &mut Buffer, x: u16, y: u16, width: u16, hunk: &Hunk, styles: &Styles) {
-    let header = format!(
-        "@@ -{},{} +{},{} @@",
-        hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count
-    );
+    let header = if hunk.header.is_empty() {
+        format!(
+            "@@ -{},{} +{},{} @@",
+            hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count
+        )
+    } else {
+        hunk.header.clone()
+    };
 
     buf.set_line(x, y, &Line::styled(header, styles.hunk_header), width);
 }
@@ -261,8 +301,9 @@ fn render_unified_line(
     y: u16,
     width: u16,
     line: &crate::git::DiffLine,
-    _filename: &str,
-    _highlighter: &mut Highlighter,
+    filename: &str,
+    line_index: usize,
+    highlighter: &mut Highlighter,
     styles: &Styles,
 ) {
     let line_num_width: u16 = 6;
@@ -279,8 +320,8 @@ fn render_unified_line(
 
     // Gutter indicator
     let (gutter_char, gutter_style, line_style) = match line.line_type {
-        LineType::Added => ("│+", styles.gutter_added, styles.line_added),
-        LineType::Removed => ("│-", styles.gutter_removed, styles.line_removed),
+        LineType::Added => ("│ ", styles.gutter_added, styles.line_added),
+        LineType::Removed => ("│ ", styles.gutter_removed, styles.line_removed),
         LineType::Context => ("│ ", styles.gutter_context, styles.line_context),
         LineType::Header => ("  ", styles.line_context, styles.hunk_header),
     };
@@ -295,14 +336,22 @@ fn render_unified_line(
     let content_x = x + line_num_width + gutter_width;
     let content_width = width.saturating_sub(line_num_width + gutter_width);
 
-    // Truncate content if needed
-    let content = truncate_str(&line.content, content_width as usize);
-    buf.set_line(content_x, y, &Line::styled(content, line_style), content_width);
-
-    // Fill background
-    for i in content_x..(content_x + content_width) {
-        buf[(i, y)].set_style(line_style);
+    if line.line_type == LineType::Header {
+        let content = truncate_str(&line.content, content_width as usize);
+        buf.set_line(content_x, y, &Line::styled(content, styles.hunk_header), content_width);
+        return;
     }
+
+    let spans = highlight_spans(
+        filename,
+        line_index,
+        &line.content,
+        highlighter,
+        line_style,
+    );
+
+    let content_line = Line::from(spans);
+    buf.set_line(content_x, y, &content_line, content_width);
 }
 
 /// Render one side of a side-by-side column
@@ -312,16 +361,17 @@ fn render_side_column(
     y: u16,
     width: u16,
     line_num_width: u16,
-    line: Option<&crate::git::DiffLine>,
-    _filename: &str,
-    _highlighter: &mut Highlighter,
+    line: Option<IndexedLine<'_>>,
+    filename: &str,
+    highlighter: &mut Highlighter,
     styles: &Styles,
     is_old: bool,
 ) {
     let gutter_width: u16 = 2;
 
     match line {
-        Some(l) => {
+        Some(indexed) => {
+            let l = indexed.line;
             // Line number
             let lineno = if is_old { l.old_lineno } else { l.new_lineno };
             let lineno_str = match lineno {
@@ -332,8 +382,8 @@ fn render_side_column(
 
             // Gutter
             let (gutter_char, gutter_style, line_style) = match l.line_type {
-                LineType::Added => ("│+", styles.gutter_added, styles.line_added),
-                LineType::Removed => ("│-", styles.gutter_removed, styles.line_removed),
+                LineType::Added => ("│ ", styles.gutter_added, styles.line_added),
+                LineType::Removed => ("│ ", styles.gutter_removed, styles.line_removed),
                 LineType::Context => ("│ ", styles.gutter_context, styles.line_context),
                 LineType::Header => ("  ", styles.line_context, styles.hunk_header),
             };
@@ -347,13 +397,22 @@ fn render_side_column(
             // Content
             let content_x = x + line_num_width + gutter_width;
             let content_width = width.saturating_sub(line_num_width + gutter_width);
-            let content = truncate_str(&l.content, content_width as usize);
-            buf.set_line(content_x, y, &Line::styled(content, line_style), content_width);
 
-            // Fill background
-            for i in content_x..(content_x + content_width) {
-                buf[(i, y)].set_style(line_style);
+            if l.line_type == LineType::Header {
+                let content = truncate_str(&l.content, content_width as usize);
+                buf.set_line(content_x, y, &Line::styled(content, styles.hunk_header), content_width);
+                return;
             }
+
+            let spans = highlight_spans(
+                filename,
+                indexed.index,
+                &l.content,
+                highlighter,
+                line_style,
+            );
+            let content_line = Line::from(spans);
+            buf.set_line(content_x, y, &content_line, content_width);
         }
         None => {
             // Empty line (no corresponding line on this side)
@@ -362,6 +421,72 @@ fn render_side_column(
             }
         }
     }
+}
+
+fn highlight_spans(
+    filename: &str,
+    line_index: usize,
+    content: &str,
+    highlighter: &mut Highlighter,
+    base_style: Style,
+) -> Vec<Span<'static>> {
+    let tokens = highlighter.get_line(filename, line_index, content);
+    if tokens.is_empty() {
+        let expanded = expand_tabs(content, TAB_WIDTH);
+        return vec![Span::styled(expanded, base_style)];
+    }
+
+    let expanded_tokens = expand_tabs_tokens(&tokens, TAB_WIDTH);
+    expanded_tokens
+        .into_iter()
+        .map(|token| Span::styled(token.text, base_style.patch(token.style)))
+        .collect()
+}
+
+fn expand_tabs_tokens(tokens: &[Token], tab_width: usize) -> Vec<Token> {
+    let mut expanded = Vec::new();
+    let mut col = 0usize;
+
+    for token in tokens {
+        let mut text = String::new();
+        for ch in token.text.chars() {
+            if ch == '\t' {
+                let spaces = tab_width.saturating_sub(col % tab_width).max(1);
+                text.extend(std::iter::repeat(' ').take(spaces));
+                col += spaces;
+            } else {
+                text.push(ch);
+                col += UnicodeWidthChar::width(ch).unwrap_or(0);
+            }
+        }
+
+        if !text.is_empty() {
+            expanded.push(Token {
+                text,
+                style: token.style,
+            });
+        }
+    }
+
+    expanded
+}
+
+fn expand_tabs(content: &str, tab_width: usize) -> String {
+    let mut expanded = String::new();
+    let mut col = 0usize;
+
+    for ch in content.chars() {
+        if ch == '\t' {
+            let spaces = tab_width.saturating_sub(col % tab_width).max(1);
+            expanded.extend(std::iter::repeat(' ').take(spaces));
+            col += spaces;
+        } else {
+            expanded.push(ch);
+            col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+
+    expanded
 }
 
 /// Truncate a string to fit width
@@ -412,7 +537,6 @@ pub fn render_diff_content(
     scroll: usize,
     mode: DiffMode,
     highlighter: &mut Highlighter,
-    focused: bool,
     styles: &Styles,
 ) {
     let content = DiffContent {
@@ -421,7 +545,6 @@ pub fn render_diff_content(
         mode,
         highlighter,
         styles,
-        focused,
     };
     content.render(area, buf);
 }

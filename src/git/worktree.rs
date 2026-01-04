@@ -14,12 +14,8 @@ pub struct Worktree {
     pub path: PathBuf,
     /// Branch name (if not detached)
     pub branch: Option<String>,
-    /// HEAD commit hash
-    pub head: String,
     /// Whether this is the current worktree
     pub is_current: bool,
-    /// Whether this is a bare repository
-    pub is_bare: bool,
 }
 
 /// List all worktrees for the repository
@@ -35,18 +31,10 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<Worktree>> {
     // Add the main worktree
     if let Some(workdir) = repo.workdir() {
         let branch = get_current_branch(&repo);
-        let head = repo.head()
-            .ok()
-            .and_then(|h| h.target())
-            .map(|oid| oid.to_string()[..7].to_string())
-            .unwrap_or_default();
-
         worktrees.push(Worktree {
             path: workdir.to_path_buf(),
             branch,
-            head,
             is_current: false,
-            is_bare: false,
         });
     }
 
@@ -58,18 +46,10 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<Worktree>> {
                 // Open the worktree as a repository to get its HEAD
                 if let Ok(wt_repo) = Repository::open(wt_path) {
                     let branch = get_current_branch(&wt_repo);
-                    let head = wt_repo.head()
-                        .ok()
-                        .and_then(|h| h.target())
-                        .map(|oid| oid.to_string()[..7].to_string())
-                        .unwrap_or_default();
-
                     worktrees.push(Worktree {
                         path: wt_path.to_path_buf(),
                         branch,
-                        head,
                         is_current: false,
-                        is_bare: false,
                     });
                 }
             }
@@ -161,16 +141,12 @@ mod tests {
             Worktree {
                 path: PathBuf::from("/repo"),
                 branch: Some("main".to_string()),
-                head: "abc1234".to_string(),
                 is_current: false,
-                is_bare: false,
             },
             Worktree {
                 path: PathBuf::from("/repo/.worktrees/feature"),
                 branch: Some("feature".to_string()),
-                head: "def5678".to_string(),
                 is_current: false,
-                is_bare: false,
             },
         ];
 

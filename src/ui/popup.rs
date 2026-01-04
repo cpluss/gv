@@ -4,7 +4,7 @@
 
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Widget},
 };
@@ -198,6 +198,7 @@ pub fn render_help_popup(buf: &mut Buffer, area: Rect, styles: &Styles) {
         ("Ctrl+d/u", "Page down/up"),
         ("g/G", "Go to top/bottom"),
         ("n/N", "Next/previous file"),
+        ("Enter", "Jump to file (sidebar)"),
         ("Tab", "Switch focus"),
         ("", ""),
         ("View", ""),

@@ -166,6 +166,7 @@ fn syntect_style_to_ratatui(style: Style) -> RatatuiStyle {
 }
 
 /// Detect language from a filename (for display purposes)
+#[allow(dead_code)]
 pub fn detect_language(filename: &str) -> &'static str {
     let path = Path::new(filename);
     let ext = path.extension()
