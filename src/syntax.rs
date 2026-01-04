@@ -69,13 +69,25 @@ impl Highlighter {
         let mut result = Vec::with_capacity(lines.len());
 
         for line in lines {
-            match highlighter.highlight_line(line, &self.syntax_set) {
+            let mut line_with_newline = line.to_string();
+            if !line_with_newline.ends_with('\n') {
+                line_with_newline.push('\n');
+            }
+
+            match highlighter.highlight_line(&line_with_newline, &self.syntax_set) {
                 Ok(ranges) => {
                     let tokens: Vec<Token> = ranges
                         .into_iter()
-                        .map(|(style, text)| Token {
-                            text: text.to_string(),
-                            style: syntect_style_to_ratatui(style),
+                        .filter_map(|(style, text)| {
+                            let trimmed = text.trim_end_matches(['\n', '\r']);
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(Token {
+                                    text: trimmed.to_string(),
+                                    style: syntect_style_to_ratatui(style),
+                                })
+                            }
                         })
                         .collect();
                     result.push(tokens);
