@@ -140,6 +140,29 @@ impl Highlighter {
             if let Some(syntax) = self.syntax_set.find_syntax_by_extension(&ext) {
                 return syntax;
             }
+
+            // Map extensions not in default syntax set to similar languages
+            let fallback_ext = match ext.as_str() {
+                // TypeScript -> JavaScript (syntect default set doesn't include TS)
+                "ts" | "tsx" | "mts" | "cts" => Some("js"),
+                // JSX -> JavaScript
+                "jsx" => Some("js"),
+                // Vue -> HTML
+                "vue" => Some("html"),
+                // Svelte -> HTML
+                "svelte" => Some("html"),
+                // Modern shell scripts
+                "zsh" | "fish" => Some("sh"),
+                // Config files
+                "jsonc" => Some("json"),
+                _ => None,
+            };
+
+            if let Some(fallback) = fallback_ext {
+                if let Some(syntax) = self.syntax_set.find_syntax_by_extension(fallback) {
+                    return syntax;
+                }
+            }
         }
 
         // Try by filename

@@ -6,6 +6,30 @@
 use std::collections::HashMap;
 use crate::git::FileDiff;
 
+/// Lock files that are considered hidden
+const HIDDEN_PATTERNS: &[&str] = &[
+    "go.sum",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Cargo.lock",
+    "Gemfile.lock",
+    "poetry.lock",
+    "composer.lock",
+];
+
+/// Check if a file path is considered hidden (dotfile or lock file)
+pub fn is_hidden_file(path: &str) -> bool {
+    // Check for dotfiles/dotfolders (any path component starting with ".")
+    if path.split('/').any(|part| part.starts_with('.')) {
+        return true;
+    }
+
+    // Check against specific hidden patterns
+    let filename = path.split('/').last().unwrap_or(path);
+    HIDDEN_PATTERNS.iter().any(|p| filename == *p)
+}
+
 /// A node in the file tree
 #[derive(Debug, Clone)]
 pub struct TreeNode {
@@ -25,6 +49,8 @@ pub struct TreeNode {
     pub diff_index: Option<usize>,
     /// Whether this folder is expanded
     pub expanded: bool,
+    /// Whether this is a hidden file (dotfile or lock file)
+    pub is_hidden: bool,
 }
 
 /// Build a file tree from a list of diffs
@@ -64,6 +90,7 @@ pub fn build_file_tree(diffs: &[FileDiff], expanded_folders: &HashMap<String, bo
             removed: diff.removed,
             diff_index: Some(i),
             expanded: false,
+            is_hidden: is_hidden_file(&diff.path),
         });
     }
 
@@ -77,13 +104,14 @@ pub fn build_file_tree(diffs: &[FileDiff], expanded_folders: &HashMap<String, bo
 
             TreeNode {
                 name,
-                path,
+                path: path.clone(),
                 is_folder: true,
                 depth,
                 added,
                 removed,
                 diff_index: None,
                 expanded,
+                is_hidden: is_hidden_file(&path),
             }
         })
         .collect();

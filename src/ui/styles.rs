@@ -89,6 +89,8 @@ pub struct Styles {
     // Sidebar
     pub sidebar_normal: Style,
     pub sidebar_cursor: Style,
+    pub sidebar_hidden: Style,
+    pub sidebar_hidden_cursor: Style,
     pub folder_icon: Style,
 
     // Borders
@@ -166,6 +168,10 @@ impl Styles {
                 .bg(colors::CURSOR_BG)
                 .fg(colors::FG)
                 .add_modifier(Modifier::BOLD),
+            sidebar_hidden: Style::default().fg(colors::DIM),
+            sidebar_hidden_cursor: Style::default()
+                .bg(colors::CURSOR_BG)
+                .fg(colors::DIM),
             folder_icon: Style::default().fg(colors::DIM),
 
             // Borders

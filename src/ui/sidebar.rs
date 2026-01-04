@@ -63,10 +63,11 @@ impl Widget for Sidebar<'_> {
             }
 
             let is_cursor = i + self.scroll == self.cursor;
-            let style = if is_cursor {
-                self.styles.sidebar_cursor
-            } else {
-                self.styles.sidebar_normal
+            let style = match (is_cursor, node.is_hidden) {
+                (true, true) => self.styles.sidebar_hidden_cursor,
+                (true, false) => self.styles.sidebar_cursor,
+                (false, true) => self.styles.sidebar_hidden,
+                (false, false) => self.styles.sidebar_normal,
             };
 
             // Build the line

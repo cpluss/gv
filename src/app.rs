@@ -23,7 +23,7 @@ use crate::git::{self, Commit, FileDiff, Worktree};
 use crate::syntax::Highlighter;
 use crate::ui::{
     DiffMode, FocusArea, Styles, TreeNode,
-    build_file_tree, flatten_tree,
+    build_file_tree, flatten_tree, is_hidden_file,
     render_diff_content, render_footer, render_header, render_sidebar,
     render_commit_popup, render_worktree_popup, render_help_popup,
     diff_view::{calculate_total_lines, file_line_count},
@@ -44,18 +44,6 @@ pub enum ViewMode {
     /// Help overlay
     Help,
 }
-
-/// Hidden file patterns (lock files, etc.)
-const HIDDEN_PATTERNS: &[&str] = &[
-    "go.sum",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "Cargo.lock",
-    "Gemfile.lock",
-    "poetry.lock",
-    "composer.lock",
-];
 
 const MOUSE_SCROLL_LINES: i32 = 5;
 
@@ -463,6 +451,11 @@ impl App {
 
     /// Get the file at the current scroll position
     fn get_current_file(&self) -> Option<String> {
+        self.get_file_at_position(self.content_scroll)
+    }
+
+    /// Get the file at a specific scroll position
+    fn get_file_at_position(&self, position: usize) -> Option<String> {
         let visible: Vec<&FileDiff> = self.visible_diffs
             .iter()
             .filter_map(|&i| self.diffs.get(i))
@@ -472,7 +465,7 @@ impl App {
         for diff in visible {
             let file_lines = file_line_count(diff, self.diff_mode);
 
-            if line + file_lines > self.content_scroll {
+            if line + file_lines > position {
                 return Some(diff.path.clone());
             }
             line += file_lines;
@@ -800,6 +793,13 @@ impl App {
                     self.handle_sidebar_click(mouse.row);
                 } else {
                     self.focus = FocusArea::Content;
+                    // Handle click in content area (diff view)
+                    // Layout: header (row 0), content (rows 1 to height-2), footer (row height-1)
+                    if mouse.row >= 1 && mouse.row < self.height.saturating_sub(1) {
+                        let row_in_content = (mouse.row - 1) as usize;
+                        let position = self.content_scroll + row_in_content;
+                        self.toggle_file_at_position(position);
+                    }
                 }
             }
             _ => {}
@@ -900,11 +900,23 @@ impl App {
     /// Toggle collapse on current file
     fn toggle_current_file(&mut self) {
         if let Some(current_file) = self.get_current_file() {
-            if let Some(diff) = self.diffs.iter_mut().find(|d| d.path == current_file) {
-                diff.collapsed = !diff.collapsed;
-            }
+            self.toggle_file(&current_file);
+        }
+    }
+
+    /// Toggle collapse on a specific file
+    fn toggle_file(&mut self, path: &str) {
+        if let Some(diff) = self.diffs.iter_mut().find(|d| d.path == path) {
+            diff.collapsed = !diff.collapsed;
         }
         self.set_content_scroll(self.content_scroll);
+    }
+
+    /// Toggle collapse on file at a specific scroll position
+    fn toggle_file_at_position(&mut self, position: usize) {
+        if let Some(file) = self.get_file_at_position(position) {
+            self.toggle_file(&file);
+        }
     }
 
     /// Toggle collapse on all files
@@ -1096,16 +1108,4 @@ impl App {
         }
     }
 
-}
-
-/// Check if a file matches hidden patterns
-fn is_hidden_file(path: &str) -> bool {
-    // Check for dotfiles/dotfolders (any path component starting with ".")
-    if path.split('/').any(|part| part.starts_with('.')) {
-        return true;
-    }
-
-    // Check against specific hidden patterns
-    let filename = path.split('/').last().unwrap_or(path);
-    HIDDEN_PATTERNS.iter().any(|p| filename == *p)
 }

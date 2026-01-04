@@ -325,8 +325,6 @@ fn render_side_by_side_full(content: DiffContent<'_>, area: Rect, buf: &mut Buff
                                 content.styles.line_context,
                                 content.styles,
                             );
-                            old_idx += 1;
-                            new_idx += 1;
                         }
                         LineType::Removed => {
                             let old_line = old_lines
@@ -366,7 +364,6 @@ fn render_side_by_side_full(content: DiffContent<'_>, area: Rect, buf: &mut Buff
                                 content.styles.line_context,
                                 content.styles,
                             );
-                            old_idx += 1;
                         }
                         LineType::Added => {
                             let new_line = new_lines
@@ -406,10 +403,24 @@ fn render_side_by_side_full(content: DiffContent<'_>, area: Rect, buf: &mut Buff
                                 content.styles.line_added,
                                 content.styles,
                             );
-                            new_idx += 1;
                         }
                         LineType::Header => {}
                     }
+                }
+
+                // Always increment indices based on line type, regardless of visibility
+                match line.line_type {
+                    LineType::Context => {
+                        old_idx += 1;
+                        new_idx += 1;
+                    }
+                    LineType::Removed => {
+                        old_idx += 1;
+                    }
+                    LineType::Added => {
+                        new_idx += 1;
+                    }
+                    LineType::Header => {}
                 }
 
                 current_line += 1;

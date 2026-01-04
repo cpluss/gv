@@ -28,29 +28,52 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<Worktree>> {
 
     let mut worktrees = Vec::new();
 
+    // Get the common .git directory (shared by all worktrees)
+    // The parent of commondir is the main worktree
+    let commondir = repo.commondir();
+    let main_workdir = commondir.parent();
+
     // Add the main worktree
-    if let Some(workdir) = repo.workdir() {
-        let branch = get_current_branch(&repo);
+    if let Some(main_path) = main_workdir {
+        // Check if we're already in the main worktree
+        let is_main = repo.workdir().map_or(false, |wd| wd == main_path);
+        let branch = if is_main {
+            get_current_branch(&repo)
+        } else if let Ok(main_repo) = Repository::open(main_path) {
+            get_current_branch(&main_repo)
+        } else {
+            None
+        };
         worktrees.push(Worktree {
-            path: workdir.to_path_buf(),
+            path: main_path.to_path_buf(),
             branch,
             is_current: false,
         });
     }
 
+    // Open main repository to get linked worktrees list
+    // (linked worktrees can only be listed from the main repo)
+    let main_repo = if let Some(main_path) = main_workdir {
+        Repository::open(main_path).ok()
+    } else {
+        None
+    };
+
     // Add linked worktrees
-    let worktree_names = repo.worktrees()?;
-    for name in worktree_names.iter().flatten() {
-        if let Ok(wt) = repo.find_worktree(name) {
-            if let Some(wt_path) = wt.path().parent() {
-                // Open the worktree as a repository to get its HEAD
-                if let Ok(wt_repo) = Repository::open(wt_path) {
-                    let branch = get_current_branch(&wt_repo);
-                    worktrees.push(Worktree {
-                        path: wt_path.to_path_buf(),
-                        branch,
-                        is_current: false,
-                    });
+    if let Some(main_repo) = main_repo {
+        let worktree_names = main_repo.worktrees()?;
+        for name in worktree_names.iter().flatten() {
+            if let Ok(wt) = main_repo.find_worktree(name) {
+                if let Some(wt_path) = wt.path().parent() {
+                    // Open the worktree as a repository to get its HEAD
+                    if let Ok(wt_repo) = Repository::open(wt_path) {
+                        let branch = get_current_branch(&wt_repo);
+                        worktrees.push(Worktree {
+                            path: wt_path.to_path_buf(),
+                            branch,
+                            is_current: false,
+                        });
+                    }
                 }
             }
         }
