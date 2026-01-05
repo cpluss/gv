@@ -204,7 +204,7 @@ pub fn render_help_popup(buf: &mut Buffer, area: Rect, styles: &Styles) {
         ("View", ""),
         ("u", "Cycle view (split/unified/full)"),
         ("x", "Cycle context lines"),
-        ("[/]", "Resize sidebar"),
+        ("[/]", "Resize sidebar (or drag border)"),
         ("/", "Search files"),
         ("Space", "Collapse/expand file"),
         ("z", "Collapse/expand all"),

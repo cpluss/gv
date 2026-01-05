@@ -89,6 +89,7 @@ pub struct App {
     show_hidden: bool,
     context_lines: u32,
     sidebar_width: u16,
+    sidebar_dragging: bool, // True when dragging sidebar border to resize
 
     // Filter input (for worktree switcher)
     filter_input: String,
@@ -97,6 +98,7 @@ pub struct App {
     search_input: String,
     search_matches: Vec<usize>, // Indices into flattened tree or diffs
     search_match_index: usize,
+    search_active: bool, // True when search is confirmed (Enter pressed)
 
     // Number prefix for vim-style jumps
     number_prefix: Option<usize>,
@@ -139,10 +141,12 @@ impl App {
             show_hidden: false,
             context_lines: 3,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            sidebar_dragging: false,
             filter_input: String::new(),
             search_input: String::new(),
             search_matches: Vec::new(),
             search_match_index: 0,
+            search_active: false,
             number_prefix: None,
             styles: Styles::new(),
             highlighter: Highlighter::new(),
@@ -342,7 +346,11 @@ impl App {
         let area = frame.area();
 
         match self.view_mode {
-            ViewMode::Diff => self.render_diff_view(frame, area),
+            ViewMode::Diff => {
+                self.render_diff_view(frame, area);
+                // Show search indicator when search is active
+                self.render_search_indicator(frame.buffer_mut(), area);
+            }
             ViewMode::CommitFilter => {
                 self.render_diff_view(frame, area);
                 render_commit_popup(frame.buffer_mut(), area, &self.commits, self.popup_cursor, &self.styles);
@@ -492,12 +500,35 @@ impl App {
                 " (no matches)".to_string()
             }
         } else {
-            format!(" ({}/{})", self.search_match_index + 1, self.search_matches.len())
+            format!(" ({}/{}) [n/N to navigate, Enter to confirm, Esc to cancel]",
+                    self.search_match_index + 1, self.search_matches.len())
         };
         spans.push(Span::styled(match_info, self.styles.line_number));
 
         let line = Line::from(spans);
         buf.set_line(0, y, &line, area.width);
+    }
+
+    /// Render search indicator in footer when search is active
+    fn render_search_indicator(&self, buf: &mut ratatui::buffer::Buffer, area: Rect) {
+        use ratatui::text::{Line, Span};
+
+        if !self.search_active || self.search_input.is_empty() {
+            return;
+        }
+
+        // Draw at the bottom (over footer)
+        let y = area.height.saturating_sub(1);
+
+        // Show active search indicator on the right side
+        let indicator = format!(" /{} ({}/{}) ",
+                               self.search_input,
+                               self.search_match_index + 1,
+                               self.search_matches.len());
+        let x = area.width.saturating_sub(indicator.len() as u16);
+
+        let line = Line::from(vec![Span::styled(indicator, self.styles.popup_title)]);
+        buf.set_line(x, y, &line, area.width - x);
     }
 
     /// Get the file at the current scroll position
@@ -615,13 +646,27 @@ impl App {
                 }
             }
             (KeyCode::Char('n'), _) => {
-                for _ in 0..count {
-                    self.next_file();
+                if self.search_active {
+                    // Navigate search matches (vim style)
+                    for _ in 0..count {
+                        self.next_search_match();
+                    }
+                } else {
+                    for _ in 0..count {
+                        self.next_file();
+                    }
                 }
             }
             (KeyCode::Char('N'), _) => {
-                for _ in 0..count {
-                    self.prev_file();
+                if self.search_active {
+                    // Navigate search matches (vim style)
+                    for _ in 0..count {
+                        self.prev_search_match();
+                    }
+                } else {
+                    for _ in 0..count {
+                        self.prev_file();
+                    }
                 }
             }
 
@@ -704,6 +749,7 @@ impl App {
                 self.search_input.clear();
                 self.search_matches.clear();
                 self.search_match_index = 0;
+                self.search_active = false;
             }
 
             _ => {}
@@ -839,31 +885,44 @@ impl App {
     fn handle_search_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
+                // Cancel search - clear everything
                 self.view_mode = ViewMode::Diff;
                 self.search_input.clear();
+                self.search_matches.clear();
+                self.search_active = false;
             }
             KeyCode::Enter => {
-                // Confirm search and jump to first match
+                // Confirm search - keep search active for n/N navigation
+                self.search_active = !self.search_matches.is_empty();
                 if !self.search_matches.is_empty() {
-                    self.jump_to_search_match(0);
+                    self.jump_to_search_match(self.search_match_index);
                 }
                 self.view_mode = ViewMode::Diff;
             }
-            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Next match while in search mode
+            KeyCode::Char('n') => {
+                // Next match while typing (vim style)
                 self.next_search_match();
             }
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Previous match while in search mode
+            KeyCode::Char('N') => {
+                // Previous match while typing (vim style)
                 self.prev_search_match();
             }
             KeyCode::Char(c) => {
                 self.search_input.push(c);
                 self.update_search_matches();
+                // Auto-jump to first match as user types (like vim incremental search)
+                if !self.search_matches.is_empty() {
+                    self.search_match_index = 0;
+                    self.jump_to_search_match(0);
+                }
             }
             KeyCode::Backspace => {
                 self.search_input.pop();
                 self.update_search_matches();
+                if !self.search_matches.is_empty() {
+                    self.search_match_index = 0;
+                    self.jump_to_search_match(0);
+                }
             }
             _ => {}
         }
@@ -936,6 +995,9 @@ impl App {
 
     /// Handle mouse input
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Check if click is near the sidebar border (within 2 columns)
+        let near_border = (mouse.column as i32 - self.sidebar_width as i32).abs() <= 1;
+
         match mouse.kind {
             MouseEventKind::ScrollDown => {
                 if mouse.column < self.sidebar_width {
@@ -952,8 +1014,10 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                // Check if click is in sidebar
-                if mouse.column < self.sidebar_width {
+                if near_border {
+                    // Start dragging the sidebar border
+                    self.sidebar_dragging = true;
+                } else if mouse.column < self.sidebar_width {
                     self.focus = FocusArea::Sidebar;
                     self.handle_sidebar_click(mouse.row);
                 } else {
@@ -965,6 +1029,19 @@ impl App {
                         let position = self.content_scroll + row_in_content;
                         self.toggle_file_at_position(position);
                     }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                // Stop dragging
+                self.sidebar_dragging = false;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.sidebar_dragging {
+                    // Resize sidebar to mouse position
+                    let new_width = mouse.column.max(MIN_SIDEBAR_WIDTH).min(MAX_SIDEBAR_WIDTH);
+                    // Don't let sidebar take more than 80% of screen width
+                    let max_width = (self.width * 4 / 5).min(MAX_SIDEBAR_WIDTH);
+                    self.sidebar_width = new_width.min(max_width);
                 }
             }
             _ => {}
