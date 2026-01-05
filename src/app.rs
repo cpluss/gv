@@ -500,7 +500,7 @@ impl App {
                 " (no matches)".to_string()
             }
         } else {
-            format!(" ({}/{}) [n/N to navigate, Enter to confirm, Esc to cancel]",
+            format!(" ({}/{}) [Enter to confirm, Esc to cancel]",
                     self.search_match_index + 1, self.search_matches.len())
         };
         spans.push(Span::styled(match_info, self.styles.line_number));
@@ -899,15 +899,8 @@ impl App {
                 }
                 self.view_mode = ViewMode::Diff;
             }
-            KeyCode::Char('n') => {
-                // Next match while typing (vim style)
-                self.next_search_match();
-            }
-            KeyCode::Char('N') => {
-                // Previous match while typing (vim style)
-                self.prev_search_match();
-            }
             KeyCode::Char(c) => {
+                // All characters go into the search query
                 self.search_input.push(c);
                 self.update_search_matches();
                 // Auto-jump to first match as user types (like vim incremental search)
