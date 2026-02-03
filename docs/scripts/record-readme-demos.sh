@@ -41,12 +41,13 @@ Set TypingSpeed 50ms
 Set Padding 10
 
 Hide
+Sleep 100ms
 Type "cd ${DEMO_REPO} && ${GV}"
 Enter
-Sleep 1s
+Sleep 3s
 Show
 
-Sleep 500ms
+Sleep 300ms
 
 # Scroll down
 Type "j"
@@ -131,12 +132,13 @@ Set Theme "Dracula"
 Set Padding 10
 
 Hide
+Sleep 100ms
 Type "cd ${DEMO_REPO} && ${GV}"
 Enter
-Sleep 1s
+Sleep 3s
 Show
 
-Sleep 500ms
+Sleep 300ms
 
 # Open worktree selector
 Type "w"
