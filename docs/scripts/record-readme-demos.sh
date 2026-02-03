@@ -1,9 +1,9 @@
 #!/bin/bash
-# Record demo GIFs for the gv README using vhs (Charm's terminal recorder)
+# Record demo GIFs for the vibed README using vhs (Charm's terminal recorder)
 #
 # Prerequisites:
 #   brew install vhs
-#   cargo install gv (or have gv in PATH)
+#   cargo install vibed (or have vibed in PATH)
 #
 # Usage:
 #   ./docs/scripts/record-readme-demos.sh
@@ -14,8 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUTPUT_DIR="$REPO_ROOT/docs/images"
 
-# Use globally installed gv
-GV="gv"
+# Use globally installed vibed
+GV="vibed"
 
 # Demo repo with multiple worktrees - use a worktree with interesting diff content
 DEMO_REPO="$HOME/conductor/workspaces/cria/luxembourg"
@@ -29,9 +29,9 @@ echo "Demo repo: $DEMO_REPO"
 echo ""
 
 # Demo 1: Navigation - scroll through diff
-echo "==> Recording: gv-navigation.gif"
-cat > /tmp/gv-navigation.tape << TAPE
-Output "${OUTPUT_DIR}/gv-navigation.gif"
+echo "==> Recording: vibed-navigation.gif"
+cat > /tmp/vibed-navigation.tape << TAPE
+Output "${OUTPUT_DIR}/vibed-navigation.gif"
 Set Shell "bash"
 Set FontSize 12
 Set Width 1200
@@ -81,14 +81,14 @@ Sleep 600ms
 Type "q"
 Sleep 200ms
 TAPE
-vhs /tmp/gv-navigation.tape
-echo "Done: $OUTPUT_DIR/gv-navigation.gif"
+vhs /tmp/vibed-navigation.tape
+echo "Done: $OUTPUT_DIR/vibed-navigation.gif"
 echo ""
 
 # Demo 2: Toggle unified/side-by-side view
-echo "==> Recording: gv-views.gif"
-cat > /tmp/gv-views.tape << TAPE
-Output "${OUTPUT_DIR}/gv-views.gif"
+echo "==> Recording: vibed-views.gif"
+cat > /tmp/vibed-views.tape << TAPE
+Output "${OUTPUT_DIR}/vibed-views.gif"
 Set Shell "bash"
 Set FontSize 12
 Set Width 1200
@@ -116,14 +116,14 @@ Sleep 1000ms
 Type "q"
 Sleep 200ms
 TAPE
-vhs /tmp/gv-views.tape
-echo "Done: $OUTPUT_DIR/gv-views.gif"
+vhs /tmp/vibed-views.tape
+echo "Done: $OUTPUT_DIR/vibed-views.gif"
 echo ""
 
 # Demo 3: Worktree switching
-echo "==> Recording: gv-worktree.gif"
-cat > /tmp/gv-worktree.tape << TAPE
-Output "${OUTPUT_DIR}/gv-worktree.gif"
+echo "==> Recording: vibed-worktree.gif"
+cat > /tmp/vibed-worktree.tape << TAPE
+Output "${OUTPUT_DIR}/vibed-worktree.gif"
 Set Shell "bash"
 Set FontSize 12
 Set Width 1200
@@ -156,14 +156,14 @@ Sleep 1000ms
 Type "q"
 Sleep 200ms
 TAPE
-vhs /tmp/gv-worktree.tape
-echo "Done: $OUTPUT_DIR/gv-worktree.gif"
+vhs /tmp/vibed-worktree.tape
+echo "Done: $OUTPUT_DIR/vibed-worktree.gif"
 echo ""
 
 # Demo 4: Collapse/expand files
-echo "==> Recording: gv-collapse.gif"
-cat > /tmp/gv-collapse.tape << TAPE
-Output "${OUTPUT_DIR}/gv-collapse.gif"
+echo "==> Recording: vibed-collapse.gif"
+cat > /tmp/vibed-collapse.tape << TAPE
+Output "${OUTPUT_DIR}/vibed-collapse.gif"
 Set Shell "bash"
 Set FontSize 12
 Set Width 1200
@@ -203,14 +203,14 @@ Sleep 600ms
 Type "q"
 Sleep 200ms
 TAPE
-vhs /tmp/gv-collapse.tape
-echo "Done: $OUTPUT_DIR/gv-collapse.gif"
+vhs /tmp/vibed-collapse.tape
+echo "Done: $OUTPUT_DIR/vibed-collapse.gif"
 echo ""
 
 # Demo 5: Help screen
-echo "==> Recording: gv-help.gif"
-cat > /tmp/gv-help.tape << TAPE
-Output "${OUTPUT_DIR}/gv-help.gif"
+echo "==> Recording: vibed-help.gif"
+cat > /tmp/vibed-help.tape << TAPE
+Output "${OUTPUT_DIR}/vibed-help.gif"
 Set Shell "bash"
 Set FontSize 12
 Set Width 1200
@@ -238,12 +238,12 @@ Sleep 500ms
 Type "q"
 Sleep 200ms
 TAPE
-vhs /tmp/gv-help.tape
-echo "Done: $OUTPUT_DIR/gv-help.gif"
+vhs /tmp/vibed-help.tape
+echo "Done: $OUTPUT_DIR/vibed-help.gif"
 echo ""
 
 # Cleanup tape files
-rm -f /tmp/gv-*.tape
+rm -f /tmp/vibed-*.tape
 
 echo ""
 echo "All demos recorded!"
