@@ -7,6 +7,8 @@ Built for **multi-agent vibe coding** when you're running multiple AI agents in 
 ![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-2024-orange.svg)
 
+![gv demo](docs/images/gv-navigation.gif)
+
 ## Why gv?
 
 When you're running multiple agents across worktrees, reviewing their output is painful:
@@ -24,6 +26,8 @@ When you're running multiple agents across worktrees, reviewing their output is 
 - Auto-detects all worktrees in your repo
 - Switch instantly with fuzzy search (`w`)
 - Always compares feature branch against main
+
+![Worktree switching](docs/images/gv-worktree.gif)
 
 **Selective Commit Review**
 - View all commits, specific commits, or just uncommitted changes
