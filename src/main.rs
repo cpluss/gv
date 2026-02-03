@@ -1,4 +1,4 @@
-//! gv - Terminal UI diff viewer for git worktrees
+//! vibed - Terminal UI diff viewer for git worktrees
 //!
 //! A read-only terminal application for reviewing code changes across
 //! multiple git worktrees. Built with ratatui for efficient rendering.
@@ -6,9 +6,9 @@
 //! # Usage
 //!
 //! ```bash
-//! gv                    # Run in current directory
-//! gv /path/to/repo      # Run in specified repository
-//! gv -b origin/develop  # Use custom base branch
+//! vibed                    # Run in current directory
+//! vibed /path/to/repo      # Run in specified repository
+//! vibed -b origin/develop  # Use custom base branch
 //! ```
 
 mod app;
@@ -22,7 +22,7 @@ use clap::Parser;
 
 /// Terminal UI diff viewer for git worktrees
 #[derive(Parser, Debug)]
-#[command(name = "gv")]
+#[command(name = "vibed")]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the repository (defaults to current directory)

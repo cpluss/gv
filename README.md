@@ -1,4 +1,4 @@
-# gv
+# vibed
 
 A fast terminal UI for reviewing diffs across git worktrees.
 
@@ -6,10 +6,19 @@ Built for **multi-agent vibe coding** when you're running multiple AI agents in 
 
 ![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-2024-orange.svg)
+[![Crates.io](https://img.shields.io/crates/v/vibed.svg)](https://crates.io/crates/vibed)
 
-![gv demo](docs/images/gv-navigation.gif)
+## Installation
 
-## Why gv?
+```bash
+cargo install vibed
+```
+
+## Demo
+
+![vibed demo](docs/images/vibed-navigation.gif)
+
+## Why vibed?
 
 When you're running multiple agents across worktrees, reviewing their output is painful:
 
@@ -18,7 +27,7 @@ When you're running multiple agents across worktrees, reviewing their output is 
 - You want to see *specific commits*, not the whole branch
 - You need it to be **fast** on large repos with massive diffs
 
-**gv** solves this with a keyboard-driven TUI that lets you jump between worktrees, cherry-pick commits to review, and read syntax-highlighted diffs at speed.
+**vibed** solves this with a keyboard-driven TUI that lets you jump between worktrees, cherry-pick commits to review, and read syntax-highlighted diffs at speed.
 
 ## Features
 
@@ -27,7 +36,7 @@ When you're running multiple agents across worktrees, reviewing their output is 
 - Switch instantly with fuzzy search (`w`)
 - Always compares feature branch against main
 
-![Worktree switching](docs/images/gv-worktree.gif)
+![Worktree switching](docs/images/vibed-worktree.gif)
 
 **Selective Commit Review**
 - View all commits, specific commits, or just uncommitted changes
