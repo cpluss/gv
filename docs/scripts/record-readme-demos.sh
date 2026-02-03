@@ -43,10 +43,10 @@ Set Padding 10
 Hide
 Type "cd ${DEMO_REPO} && ${GV}"
 Enter
-Sleep 1s
+Sleep 2s
 Show
 
-Sleep 500ms
+Sleep 300ms
 
 # Scroll down
 Type "j"
@@ -133,10 +133,10 @@ Set Padding 10
 Hide
 Type "cd ${DEMO_REPO} && ${GV}"
 Enter
-Sleep 1s
+Sleep 2s
 Show
 
-Sleep 500ms
+Sleep 300ms
 
 # Open worktree selector
 Type "w"
