@@ -41,9 +41,10 @@ Set TypingSpeed 50ms
 Set Padding 10
 
 Hide
+Sleep 100ms
 Type "cd ${DEMO_REPO} && ${GV}"
 Enter
-Sleep 2s
+Sleep 3s
 Show
 
 Sleep 300ms
@@ -131,9 +132,10 @@ Set Theme "Dracula"
 Set Padding 10
 
 Hide
+Sleep 100ms
 Type "cd ${DEMO_REPO} && ${GV}"
 Enter
-Sleep 2s
+Sleep 3s
 Show
 
 Sleep 300ms
